@@ -1,6 +1,7 @@
 package sql
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -15,6 +16,7 @@ import (
 	"gorm.io/gorm"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
+	"github.com/cloudbase/garm/config"
 	"github.com/cloudbase/garm/database/common"
 	"github.com/cloudbase/garm/params"
 	"github.com/cloudbase/garm/util"
@@ -102,58 +104,81 @@ func (s *sqlDatabase) CreateFileObject(ctx context.Context, param params.CreateF
 		}
 	}()
 
+	var sha256sum string
 	var fileBlob FileBlob
-	err = s.objectsConn.Transaction(func(tx *gorm.DB) error {
-		// Create the file first
-		if err := tx.Create(&fileObj).Error; err != nil {
-			return fmt.Errorf("failed to create file object: %w", err)
-		}
 
-		// create the file blob, without any space allocated for the blob.
-		fileBlob = FileBlob{
-			FileObjectID: fileObj.ID,
-		}
-		if err := tx.Create(&fileBlob).Error; err != nil {
-			return fmt.Errorf("failed to create file blob object: %w", err)
-		}
-
-		// allocate space for the blob using the zeroblob() function. This will allow us to avoid
-		// having to allocate potentially huge byte arrays in memory and writing that huge blob to
-		// disk.
-		query := `UPDATE file_blobs SET content = zeroblob(?) WHERE id = ?`
-		if err := tx.Exec(query, param.Size, fileBlob.ID).Error; err != nil {
-			return fmt.Errorf("failed to allocate disk space: %w", err)
-		}
-		// Create tag entries
-		for _, tag := range param.Tags {
-			fileObjTag := FileObjectTag{
-				FileObjectID: fileObj.ID,
-				Tag:          tag,
+	if s.cfg.DbBackend == config.SQLiteBackend {
+		// SQLite: pre-allocate blob space with zeroblob, then stream via raw blob handle
+		// to avoid loading large files into memory and to minimize WAL contention.
+		err = s.objectsConn.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Create(&fileObj).Error; err != nil {
+				return fmt.Errorf("failed to create file object: %w", err)
 			}
-			if err := tx.Create(&fileObjTag).Error; err != nil {
-				return fmt.Errorf("failed to add tag: %w", err)
+			fileBlob = FileBlob{FileObjectID: fileObj.ID}
+			if err := tx.Create(&fileBlob).Error; err != nil {
+				return fmt.Errorf("failed to create file blob object: %w", err)
 			}
+			query := `UPDATE file_blobs SET content = zeroblob(?) WHERE id = ?`
+			if err := tx.Exec(query, param.Size, fileBlob.ID).Error; err != nil {
+				return fmt.Errorf("failed to allocate disk space: %w", err)
+			}
+			for _, tag := range param.Tags {
+				fileObjTag := FileObjectTag{FileObjectID: fileObj.ID, Tag: tag}
+				if err := tx.Create(&fileObjTag).Error; err != nil {
+					return fmt.Errorf("failed to add tag: %w", err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return params.FileObject{}, fmt.Errorf("failed to create database entry for blob: %w", err)
 		}
-		return nil
-	})
-	if err != nil {
-		return params.FileObject{}, fmt.Errorf("failed to create database entry for blob: %w", err)
-	}
-	// Stream file to blob and compute SHA256.
-	// We obtain a raw *sql.Conn for the SQLite blob API, which pins a connection
-	// from the pool. We must close it before using s.objectsConn again.
-	sha256sum, err := s.streamBlobContent(ctx, fileBlob.ID, buffer[:n], tmpFile)
-	if err != nil {
-		return params.FileObject{}, err
+		// streamBlobContent pins a raw *sql.Conn for the SQLite blob API; must be closed
+		// before using s.objectsConn again to avoid pool starvation with MaxOpenConns(1).
+		sha256sum, err = s.streamBlobContent(ctx, fileBlob.ID, buffer[:n], tmpFile)
+		if err != nil {
+			return params.FileObject{}, err
+		}
+		if err = s.objectsConn.Model(&fileObj).Update("sha256", sha256sum).Error; err != nil {
+			return params.FileObject{}, fmt.Errorf("failed to update sha256sum: %w", err)
+		}
+	} else {
+		// PostgreSQL: read the full file into memory, compute SHA256, write in one transaction.
+		if _, err = tmpFile.Seek(0, 0); err != nil {
+			return params.FileObject{}, fmt.Errorf("failed to seek to start: %w", err)
+		}
+		var data []byte
+		data, err = io.ReadAll(tmpFile)
+		if err != nil {
+			return params.FileObject{}, fmt.Errorf("failed to read file data: %w", err)
+		}
+		sum := sha256.Sum256(data)
+		sha256sum = hex.EncodeToString(sum[:])
+		fileObj.SHA256 = sha256sum
+
+		err = s.objectsConn.Transaction(func(tx *gorm.DB) error {
+			if err := tx.Create(&fileObj).Error; err != nil {
+				return fmt.Errorf("failed to create file object: %w", err)
+			}
+			fileBlob = FileBlob{FileObjectID: fileObj.ID, Content: data}
+			if err := tx.Create(&fileBlob).Error; err != nil {
+				return fmt.Errorf("failed to create file blob object: %w", err)
+			}
+			for _, tag := range param.Tags {
+				fileObjTag := FileObjectTag{FileObjectID: fileObj.ID, Tag: tag}
+				if err := tx.Create(&fileObjTag).Error; err != nil {
+					return fmt.Errorf("failed to add tag: %w", err)
+				}
+			}
+			return nil
+		})
+		if err != nil {
+			return params.FileObject{}, fmt.Errorf("failed to create database entry for blob: %w", err)
+		}
 	}
 
-	// Update document with SHA256
-	if err := s.objectsConn.Model(&fileObj).Update("sha256", sha256sum).Error; err != nil {
-		return params.FileObject{}, fmt.Errorf("failed to update sha256sum: %w", err)
-	}
-
-	// Reload document with tags
-	if err := s.objectsConn.Preload("TagsList").Omit("content").First(&fileObj, fileObj.ID).Error; err != nil {
+	// Reload with tags (both backends)
+	if err = s.objectsConn.Preload("TagsList").Omit("Content").First(&fileObj, fileObj.ID).Error; err != nil {
 		return params.FileObject{}, fmt.Errorf("failed to get file object: %w", err)
 	}
 	return s.sqlFileObjectToCommonParams(fileObj), nil
@@ -282,7 +307,7 @@ func (s *sqlDatabase) DeleteFileObjectsByTags(_ context.Context, tags []string) 
 		// Build query to find all file objects matching ALL tags
 		query := tx.Model(&FileObject{}).Preload("TagsList").Omit("content")
 		for _, tag := range tags {
-			query = query.Where("EXISTS (SELECT 1 FROM file_object_tags WHERE file_object_tags.file_object_id = file_objects.id AND file_object_tags.tag = ?)", tag)
+			query = query.Where("EXISTS (SELECT 1 FROM file_object_tags WHERE file_object_tags.file_object_id = file_objects.id AND LOWER(file_object_tags.tag) = LOWER(?))", tag)
 		}
 
 		// Get matching objects with their full details (except content blob)
@@ -350,7 +375,7 @@ func (s *sqlDatabase) SearchFileObjectByTags(_ context.Context, tags []string, p
 	var fileObjectRes []FileObject
 	query := s.objectsConn.Model(&FileObject{}).Preload("TagsList").Omit("content")
 	for _, t := range tags {
-		query = query.Where("EXISTS (SELECT 1 FROM file_object_tags WHERE file_object_tags.file_object_id = file_objects.id AND file_object_tags.tag = ?)", t)
+		query = query.Where("EXISTS (SELECT 1 FROM file_object_tags WHERE file_object_tags.file_object_id = file_objects.id AND LOWER(file_object_tags.tag) = LOWER(?))", t)
 	}
 
 	var total int64
@@ -413,11 +438,19 @@ func (s *sqlDatabase) SearchFileObjectByTags(_ context.Context, tags []string, p
 
 // OpenFileObjectContent opens a blob for reading and returns an io.ReadCloser
 func (s *sqlDatabase) OpenFileObjectContent(ctx context.Context, objID uint) (io.ReadCloser, error) {
-	// Query the blob metadata first, before pinning a raw connection.
-	// With MaxOpenConns(1), pinning the connection before this query would
-	// deadlock because GORM needs the same pooled connection.
+	if s.cfg.DbBackend != config.SQLiteBackend {
+		// PostgreSQL: load the full blob into memory and wrap in a bytes.Reader.
+		var fileBlob FileBlob
+		if err := s.objectsConn.Where("file_object_id = ?", objID).First(&fileBlob).Error; err != nil {
+			return nil, fmt.Errorf("failed to get file blob: %w", err)
+		}
+		return io.NopCloser(bytes.NewReader(fileBlob.Content)), nil
+	}
+
+	// SQLite: stream via raw blob handle to avoid loading large files into memory.
+	// Query metadata first to avoid deadlocking the single-connection pool.
 	var fileBlob FileBlob
-	if err := s.objectsConn.Where("file_object_id = ?", objID).Omit("content").First(&fileBlob).Error; err != nil {
+	if err := s.objectsConn.Where("file_object_id = ?", objID).Omit("Content").First(&fileBlob).Error; err != nil {
 		return nil, fmt.Errorf("failed to get file blob: %w", err)
 	}
 

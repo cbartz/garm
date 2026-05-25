@@ -590,13 +590,13 @@ type FileObject struct {
 type FileBlob struct {
 	gorm.Model
 	FileObjectID uint `gorm:"index:idx_fileobject_blob_id"`
-	// Content is a BLOB column for storing binary data
-	Content []byte `gorm:"type:blob"`
+	// Content is a BLOB column for storing binary data (bytea on PostgreSQL, blob on SQLite)
+	Content []byte
 }
 
 // FileObjectTag represents the many-to-many relationship between documents and tags
 type FileObjectTag struct {
 	ID           uint   `gorm:"primaryKey"`
 	FileObjectID uint   `gorm:"index:idx_fileobject_tags_doc_id,priority:1;index:idx_fileobject_tags_tag,priority:1;not null"`
-	Tag          string `gorm:"type:TEXT COLLATE NOCASE;index:idx_fileobject_tags_tag,priority:2;not null"`
+	Tag          string `gorm:"index:idx_fileobject_tags_tag,priority:2;not null"`
 }
