@@ -18,6 +18,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
@@ -219,14 +220,19 @@ func (s *sqlDatabase) findPoolByTags(id string, poolType params.ForgeEntityType,
 		return nil, fmt.Errorf("invalid poolType: %v", poolType)
 	}
 
+	lowerTags := make([]string, len(tags))
+	for i, t := range tags {
+		lowerTags[i] = strings.ToLower(t)
+	}
+
 	var pools []Pool
-	where := fmt.Sprintf("tags.name COLLATE NOCASE in ? and %s = ? and enabled = true", fieldName)
+	where := fmt.Sprintf("LOWER(tags.name) IN ? and %s = ? and enabled = true", fieldName)
 	q := s.conn.Joins("JOIN pool_tags on pool_tags.pool_id=pools.id").
 		Joins("JOIN tags on tags.id=pool_tags.tag_id").
 		Group("pools.id").
 		Preload("Tags").
-		Having("count(1) = ?", len(tags)).
-		Where(where, tags, u).
+		Having("count(1) = ?", len(lowerTags)).
+		Where(where, lowerTags, u).
 		Order("priority desc").
 		Find(&pools)
 

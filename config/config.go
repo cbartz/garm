@@ -49,6 +49,8 @@ const (
 	MySQLBackend DBBackendType = "mysql"
 	// SQLiteBackend represents the SQLite3 DB backend
 	SQLiteBackend DBBackendType = "sqlite3"
+	// PostgreSQLBackend represents the PostgreSQL DB backend
+	PostgreSQLBackend DBBackendType = "postgresql"
 	// EnvironmentVariablePrefix is the prefix for all environment variables
 	// that can not be used to get overwritten via the external provider
 	EnvironmentVariablePrefix = "GARM"
@@ -475,10 +477,11 @@ func (p *Provider) Validate() error {
 
 // Database is the database config entry
 type Database struct {
-	Debug     bool          `toml:"debug" json:"debug"`
-	DbBackend DBBackendType `toml:"backend" json:"backend"`
-	MySQL     MySQL         `toml:"mysql" json:"mysql"`
-	SQLite    SQLite        `toml:"sqlite3" json:"sqlite3"`
+	Debug      bool          `toml:"debug" json:"debug"`
+	DbBackend  DBBackendType `toml:"backend" json:"backend"`
+	MySQL      MySQL         `toml:"mysql" json:"mysql"`
+	SQLite     SQLite        `toml:"sqlite3" json:"sqlite3"`
+	PostgreSQL PostgreSQL    `toml:"postgresql" json:"postgresql"`
 	// Passphrase is used to encrypt any sensitive info before
 	// inserting it into the database. This is just temporary until
 	// we move to something like vault or barbican for secrets storage.
@@ -508,6 +511,11 @@ func (d *Database) GormParams() (dbType DBBackendType, uri string, err error) {
 		uri, err = d.SQLite.ConnectionString()
 		if err != nil {
 			return "", "", fmt.Errorf("error fetching sqlite3 connection string: %w", err)
+		}
+	case PostgreSQLBackend:
+		uri, err = d.PostgreSQL.ConnectionString()
+		if err != nil {
+			return "", "", fmt.Errorf("error fetching postgresql connection string: %w", err)
 		}
 	default:
 		return "", "", fmt.Errorf("invalid database backend: %s", dbType)
@@ -559,6 +567,10 @@ func (d *Database) Validate() error {
 	case SQLiteBackend:
 		if err := d.SQLite.Validate(); err != nil {
 			return fmt.Errorf("validating sqlite3 config: %w", err)
+		}
+	case PostgreSQLBackend:
+		if err := d.PostgreSQL.Validate(); err != nil {
+			return fmt.Errorf("validating postgresql config: %w", err)
 		}
 	default:
 		return fmt.Errorf("invalid database backend: %s", d.DbBackend)
@@ -642,6 +654,29 @@ func (m *MySQL) ConnectionString() (string, error) {
 		m.Hostname, m.DatabaseName,
 	)
 	return connString, nil
+}
+
+// PostgreSQL is the config entry for the postgresql section
+type PostgreSQL struct {
+	// DSN is the full libpq-style connection string
+	// (e.g. "host=localhost user=garm password=secret dbname=garm sslmode=disable").
+	DSN string `toml:"dsn" json:"dsn"`
+}
+
+// Validate validates a PostgreSQL config entry
+func (p *PostgreSQL) Validate() error {
+	if p.DSN == "" {
+		return fmt.Errorf("dsn is required")
+	}
+	return nil
+}
+
+// ConnectionString returns the raw DSN for the GORM postgres driver
+func (p *PostgreSQL) ConnectionString() (string, error) {
+	if err := p.Validate(); err != nil {
+		return "", err
+	}
+	return p.DSN, nil
 }
 
 // TLSConfig is the API server TLS config

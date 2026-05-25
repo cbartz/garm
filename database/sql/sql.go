@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-gormigrate/gormigrate/v2"
 	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -65,6 +66,8 @@ func newDBConn(dbCfg config.Database) (conn *gorm.DB, err error) {
 		conn, err = gorm.Open(mysql.Open(connURI), gormConfig)
 	case config.SQLiteBackend:
 		conn, err = gorm.Open(sqlite.Open(connURI), gormConfig)
+	case config.PostgreSQLBackend:
+		conn, err = gorm.Open(postgres.Open(connURI), gormConfig)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("error connecting to database: %w", err)

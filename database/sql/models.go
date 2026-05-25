@@ -79,8 +79,7 @@ type ControllerInfo struct {
 	// CACertBundle holds a certificate bundle meant to validate the certificate
 	// used by GARM itself. This can be just the root certificate that can validate
 	// the GARM TLS certificate, a chain or multiple root CAs.
-	CACertBundle []byte `gorm:"type:longblob"`
-}
+	CACertBundle []byte}
 
 type Tag struct {
 	Base
@@ -100,8 +99,7 @@ type Template struct {
 	Description string              `gorm:"type:text"`
 	OSType      commonParams.OSType `gorm:"type:varchar(32);index:idx_tpl_os_type"`
 	ForgeType   params.EndpointType `gorm:"type:varchar(32);index:idx_tpl_forge_type"`
-	Data        []byte              `gorm:"type:longblob"`
-
+	Data        []byte             
 	ScaleSets []ScaleSet `gorm:"foreignKey:TemplateID"`
 	Pools     []Pool     `gorm:"foreignKey:TemplateID"`
 }
@@ -235,8 +233,8 @@ type Repository struct {
 	PoolManagerRunning       bool
 	PoolManagerFailureReason string
 
-	Owner            string `gorm:"index:idx_owner_nocase,unique,collate:nocase"`
-	Name             string `gorm:"index:idx_owner_nocase,unique,collate:nocase"`
+	Owner            string `gorm:"index:idx_owner_nocase,unique"`
+	Name             string `gorm:"index:idx_owner_nocase,unique"`
 	WebhookSecret    []byte
 	Pools            []Pool                  `gorm:"foreignKey:RepoID"`
 	ScaleSets        []ScaleSet              `gorm:"foreignKey:RepoID"`
@@ -244,7 +242,7 @@ type Repository struct {
 	PoolBalancerType params.PoolBalancerType `gorm:"type:varchar(64)"`
 	AgentMode        bool                    `gorm:"index:repo_agent_idx"`
 
-	EndpointName *string        `gorm:"index:idx_owner_nocase,unique,collate:nocase"`
+	EndpointName *string        `gorm:"index:idx_owner_nocase,unique"`
 	Endpoint     GithubEndpoint `gorm:"foreignKey:EndpointName;constraint:OnDelete:SET NULL"`
 
 	Events []RepositoryEvent `gorm:"foreignKey:RepoID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE;"`
@@ -272,7 +270,7 @@ type Organization struct {
 	PoolManagerRunning       bool
 	PoolManagerFailureReason string
 
-	Name             string `gorm:"index:idx_org_name_nocase,collate:nocase"`
+	Name             string `gorm:"index:idx_org_name_nocase"`
 	WebhookSecret    []byte
 	Pools            []Pool                  `gorm:"foreignKey:OrgID"`
 	ScaleSet         []ScaleSet              `gorm:"foreignKey:OrgID"`
@@ -280,7 +278,7 @@ type Organization struct {
 	PoolBalancerType params.PoolBalancerType `gorm:"type:varchar(64)"`
 	AgentMode        bool                    `gorm:"index:org_agent_idx"`
 
-	EndpointName *string        `gorm:"index:idx_org_name_nocase,collate:nocase"`
+	EndpointName *string        `gorm:"index:idx_org_name_nocase"`
 	Endpoint     GithubEndpoint `gorm:"foreignKey:EndpointName;constraint:OnDelete:SET NULL"`
 
 	Events []OrganizationEvent `gorm:"foreignKey:OrgID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE;"`
@@ -306,7 +304,7 @@ type Enterprise struct {
 	PoolManagerRunning       bool
 	PoolManagerFailureReason string
 
-	Name             string `gorm:"index:idx_ent_name_nocase,collate:nocase"`
+	Name             string `gorm:"index:idx_ent_name_nocase"`
 	WebhookSecret    []byte
 	Pools            []Pool                  `gorm:"foreignKey:EnterpriseID"`
 	ScaleSet         []ScaleSet              `gorm:"foreignKey:EnterpriseID"`
@@ -314,7 +312,7 @@ type Enterprise struct {
 	PoolBalancerType params.PoolBalancerType `gorm:"type:varchar(64)"`
 	AgentMode        bool                    `gorm:"index:enterprise_agent_idx"`
 
-	EndpointName *string        `gorm:"index:idx_ent_name_nocase,collate:nocase"`
+	EndpointName *string        `gorm:"index:idx_ent_name_nocase"`
 	Endpoint     GithubEndpoint `gorm:"foreignKey:EndpointName;constraint:OnDelete:SET NULL"`
 
 	Events []EnterpriseEvent `gorm:"foreignKey:EnterpriseID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE;"`
@@ -357,10 +355,10 @@ type Instance struct {
 	Heartbeat         time.Time
 	CallbackURL       string
 	MetadataURL       string
-	ProviderFault     []byte `gorm:"type:longblob"`
+	ProviderFault     []byte
 	CreateAttempt     int
 	TokenFetched      bool
-	JitConfiguration  []byte `gorm:"type:longblob"`
+	JitConfiguration  []byte
 	GitHubRunnerGroup string
 	AditionalLabels   datatypes.JSON
 	Capabilities      datatypes.JSON
@@ -461,33 +459,31 @@ type WorkflowJob struct {
 }
 
 type GithubEndpoint struct {
-	Name      string `gorm:"type:varchar(64) collate nocase;primary_key;"`
+	Name      string `gorm:"type:varchar(64);primary_key;"`
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	DeletedAt gorm.DeletedAt `gorm:"index"`
 
 	EndpointType             params.EndpointType `gorm:"index:idx_endpoint_type"`
-	ToolsMetadataURL         string              `gorm:"type:text collate nocase"`
+	ToolsMetadataURL         string              `gorm:"type:text"`
 	UseInternalToolsMetadata bool
 
 	Description   string `gorm:"type:text"`
-	APIBaseURL    string `gorm:"type:text collate nocase"`
-	UploadBaseURL string `gorm:"type:text collate nocase"`
-	BaseURL       string `gorm:"type:text collate nocase"`
-	CACertBundle  []byte `gorm:"type:longblob"`
-}
+	APIBaseURL    string `gorm:"type:text"`
+	UploadBaseURL string `gorm:"type:text"`
+	BaseURL       string `gorm:"type:text"`
+	CACertBundle  []byte}
 
 type GithubCredentials struct {
 	gorm.Model
 
-	Name   string     `gorm:"index:idx_github_credentials,unique;type:varchar(64) collate nocase"`
+	Name   string     `gorm:"index:idx_github_credentials,unique;type:varchar(64)"`
 	UserID *uuid.UUID `gorm:"index:idx_github_credentials,unique"`
 	User   User       `gorm:"foreignKey:UserID"`
 
 	Description string               `gorm:"type:text"`
 	AuthType    params.ForgeAuthType `gorm:"index"`
-	Payload     []byte               `gorm:"type:longblob"`
-
+	Payload     []byte              
 	Endpoint     GithubEndpoint `gorm:"foreignKey:EndpointName"`
 	EndpointName *string        `gorm:"index"`
 
@@ -507,14 +503,13 @@ func (g GithubCredentials) GetID() uint {
 type GiteaCredentials struct {
 	gorm.Model
 
-	Name   string     `gorm:"index:idx_gitea_credentials,unique;type:varchar(64) collate nocase"`
+	Name   string     `gorm:"index:idx_gitea_credentials,unique;type:varchar(64)"`
 	UserID *uuid.UUID `gorm:"index:idx_gitea_credentials,unique"`
 	User   User       `gorm:"foreignKey:UserID"`
 
 	Description string               `gorm:"type:text"`
 	AuthType    params.ForgeAuthType `gorm:"index"`
-	Payload     []byte               `gorm:"type:longblob"`
-
+	Payload     []byte              
 	Endpoint     GithubEndpoint `gorm:"foreignKey:EndpointName"`
 	EndpointName *string        `gorm:"index"`
 

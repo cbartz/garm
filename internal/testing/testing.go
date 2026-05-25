@@ -19,13 +19,17 @@ package testing
 
 import (
 	"context"
+	dbsql "database/sql"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 	"testing"
 
+	"github.com/google/uuid"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/require"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
@@ -208,6 +212,47 @@ func GetTestSqliteDBConfig(t *testing.T) config.Database {
 			DBFile:             filepath.Join(dir, "garm.db"),
 			BusyTimeoutSeconds: 30, // 30 second timeout for concurrent transactions
 		},
+	}
+}
+
+// GetTestDBConfig returns a PostgreSQL config when GARM_TEST_POSTGRES_DSN is set,
+// otherwise falls back to SQLite. Use this in database tests to exercise both backends.
+//
+// When Postgres is used, each call creates an isolated schema scoped to the test and
+// registers a t.Cleanup that drops it, preventing data leakage between test cases.
+func GetTestDBConfig(t *testing.T) config.Database {
+	baseDSN := os.Getenv("GARM_TEST_POSTGRES_DSN")
+	if baseDSN == "" {
+		return GetTestSqliteDBConfig(t)
+	}
+
+	schemaName := "garm_test_" + strings.ReplaceAll(uuid.New().String(), "-", "_")
+
+	db, err := dbsql.Open("pgx", baseDSN)
+	if err != nil {
+		t.Fatalf("failed to open postgres connection for schema setup: %s", err)
+	}
+
+	if _, err := db.Exec("CREATE SCHEMA " + schemaName); err != nil {
+		db.Close()
+		t.Fatalf("failed to create test schema %s: %s", schemaName, err)
+	}
+	db.Close()
+
+	t.Cleanup(func() {
+		conn, err := dbsql.Open("pgx", baseDSN)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		conn.Exec("DROP SCHEMA " + schemaName + " CASCADE") //nolint:errcheck
+	})
+
+	return config.Database{
+		Debug:      false,
+		DbBackend:  config.PostgreSQLBackend,
+		Passphrase: encryptionPassphrase,
+		PostgreSQL: config.PostgreSQL{DSN: baseDSN + " search_path=" + schemaName},
 	}
 }
 

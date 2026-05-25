@@ -371,6 +371,24 @@ func TestDatabaseConfig(t *testing.T) {
 			},
 			errString: "",
 		},
+		{
+			name: "postgresql backend is misconfigured",
+			cfg: Database{
+				DbBackend:  PostgreSQLBackend,
+				PostgreSQL: PostgreSQL{},
+				Passphrase: cfg.Passphrase,
+			},
+			errString: "validating postgresql config: dsn is required",
+		},
+		{
+			name: "postgresql backend is configured and valid",
+			cfg: Database{
+				DbBackend:  PostgreSQLBackend,
+				PostgreSQL: PostgreSQL{DSN: "host=localhost user=garm password=secret dbname=garm sslmode=disable"},
+				Passphrase: cfg.Passphrase,
+			},
+			errString: "",
+		},
 	}
 
 	for _, tc := range tests {
@@ -413,6 +431,49 @@ func TestGormParams(t *testing.T) {
 	require.Nil(t, err)
 	require.Equal(t, MySQLBackend, dbType)
 	require.Equal(t, "test:test@tcp(127.0.0.1)/garm?charset=utf8&parseTime=True&loc=Local&timeout=5s", uri)
+
+	cfg.DbBackend = PostgreSQLBackend
+	cfg.MySQL = MySQL{}
+	cfg.PostgreSQL = PostgreSQL{DSN: "host=localhost user=garm password=secret dbname=garm sslmode=disable"}
+
+	dbType, uri, err = cfg.GormParams()
+	require.Nil(t, err)
+	require.Equal(t, PostgreSQLBackend, dbType)
+	require.Equal(t, "host=localhost user=garm password=secret dbname=garm sslmode=disable", uri)
+}
+
+func TestPostgreSQLConfig(t *testing.T) {
+	tests := []struct {
+		name      string
+		cfg       PostgreSQL
+		errString string
+	}{
+		{
+			name:      "valid config",
+			cfg:       PostgreSQL{DSN: "host=localhost user=garm password=secret dbname=garm sslmode=disable"},
+			errString: "",
+		},
+		{
+			name:      "empty DSN",
+			cfg:       PostgreSQL{},
+			errString: "dsn is required",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if tc.errString == "" {
+				require.Nil(t, err)
+				cs, err := tc.cfg.ConnectionString()
+				require.Nil(t, err)
+				require.Equal(t, tc.cfg.DSN, cs)
+			} else {
+				require.NotNil(t, err)
+				require.Regexp(t, tc.errString, err.Error())
+			}
+		})
+	}
 }
 
 func TestSQLiteConfig(t *testing.T) {
