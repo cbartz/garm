@@ -1,0 +1,14 @@
+name: GARM PostgreSQL PoC test
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-garm-runner:
+    runs-on: garm-poc-scaleset
+    steps:
+      - name: Verify runner
+        run: |
+          echo "Runner is live!"
+          echo "Hostname: $(hostname)"
+          echo "Date: $(date)"
