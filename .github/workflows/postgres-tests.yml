@@ -28,6 +28,14 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y libbtrfs-dev build-essential
 
+      - name: Increase PostgreSQL max_connections
+        run: |
+          PG_CONTAINER=$(docker ps -q --filter ancestor=postgres:16)
+          docker exec "$PG_CONTAINER" psql -U garm -d garm \
+            -c "ALTER SYSTEM SET max_connections = 300;"
+          docker restart "$PG_CONTAINER"
+          until docker exec "$PG_CONTAINER" pg_isready -U garm 2>/dev/null; do sleep 1; done
+
       - name: Checkout
         uses: actions/checkout@v6
 
