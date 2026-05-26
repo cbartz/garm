@@ -354,7 +354,7 @@ func TestDatabaseConfig(t *testing.T) {
 			errString: "database passphrase is too weak",
 		},
 		{
-			name: "sqlite3 backend is missconfigured",
+			name: "sqlite3 backend is misconfigured",
 			cfg: Database{
 				DbBackend: cfg.DbBackend,
 				SQLite: SQLite{
@@ -365,7 +365,7 @@ func TestDatabaseConfig(t *testing.T) {
 			errString: "validating sqlite3 config: no valid db_file was specified",
 		},
 		{
-			name: "mysql backend is missconfigured",
+			name: "mysql backend is misconfigured",
 			cfg: Database{
 				DbBackend:  MySQLBackend,
 				MySQL:      MySQL{},
@@ -386,7 +386,7 @@ func TestDatabaseConfig(t *testing.T) {
 			name: "postgresql backend is misconfigured",
 			cfg: Database{
 				DbBackend:  PostgreSQLBackend,
-				Postgres:   PostgreSQL{},
+				PostgreSQL:   PostgreSQL{},
 				Passphrase: cfg.Passphrase,
 			},
 			errString: "validating postgresql config: username is required",
@@ -395,7 +395,7 @@ func TestDatabaseConfig(t *testing.T) {
 			name: "postgresql backend is configured and valid",
 			cfg: Database{
 				DbBackend:  PostgreSQLBackend,
-				Postgres:   getPostgresDefaultConfig(),
+				PostgreSQL:   getPostgresDefaultConfig(),
 				Passphrase: cfg.Passphrase,
 			},
 			errString: "",
@@ -445,7 +445,7 @@ func TestGormParams(t *testing.T) {
 
 	cfg.DbBackend = PostgreSQLBackend
 	cfg.MySQL = MySQL{}
-	cfg.Postgres = getPostgresDefaultConfig()
+	cfg.PostgreSQL = getPostgresDefaultConfig()
 
 	dbType, uri, err = cfg.GormParams()
 	require.Nil(t, err)

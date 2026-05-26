@@ -482,7 +482,7 @@ type Database struct {
 	DbBackend DBBackendType `toml:"backend" json:"backend"`
 	MySQL     MySQL         `toml:"mysql" json:"mysql"`
 	SQLite    SQLite        `toml:"sqlite3" json:"sqlite3"`
-	Postgres  PostgreSQL    `toml:"postgresql" json:"postgresql"`
+	PostgreSQL PostgreSQL   `toml:"postgresql" json:"postgresql"`
 	// Passphrase is used to encrypt any sensitive info before
 	// inserting it into the database. This is just temporary until
 	// we move to something like vault or barbican for secrets storage.
@@ -514,7 +514,7 @@ func (d *Database) GormParams() (dbType DBBackendType, uri string, err error) {
 			return "", "", fmt.Errorf("error fetching sqlite3 connection string: %w", err)
 		}
 	case PostgreSQLBackend:
-		uri, err = d.Postgres.ConnectionString()
+		uri, err = d.PostgreSQL.ConnectionString()
 		if err != nil {
 			return "", "", fmt.Errorf("error fetching postgresql connection string: %w", err)
 		}
@@ -570,7 +570,7 @@ func (d *Database) Validate() error {
 			return fmt.Errorf("validating sqlite3 config: %w", err)
 		}
 	case PostgreSQLBackend:
-		if err := d.Postgres.Validate(); err != nil {
+		if err := d.PostgreSQL.Validate(); err != nil {
 			return fmt.Errorf("validating postgresql config: %w", err)
 		}
 	default:
@@ -690,18 +690,15 @@ func (p *PostgreSQL) Validate() error {
 	if p.SSLMode == "" {
 		p.SSLMode = "disable"
 	}
-	validSSLModes := map[string]struct{}{
-		"disable": {}, "allow": {}, "prefer": {}, "require": {}, "verify-ca": {}, "verify-full": {},
-	}
-	if _, ok := validSSLModes[p.SSLMode]; !ok {
+	switch p.SSLMode {
+	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
+	default:
 		return fmt.Errorf("invalid sslmode %q: must be one of disable, allow, prefer, require, verify-ca, verify-full", p.SSLMode)
 	}
 	return nil
 }
 
-// ConnectionString returns a pgx-compatible DSN.
-// Values containing spaces, single quotes, or backslashes are single-quoted
-// per the libpq key=value connection string format.
+// ConnectionString returns a pgx-compatible DSN in libpq key=value format.
 func (p *PostgreSQL) ConnectionString() (string, error) {
 	if err := p.Validate(); err != nil {
 		return "", err
@@ -713,7 +710,8 @@ func (p *PostgreSQL) ConnectionString() (string, error) {
 }
 
 // pgQuoteValue quotes a connection string value if it contains characters that
-// require quoting in the libpq key=value format (spaces, single quotes, backslashes).
+// require quoting in the libpq key=value format (empty string, spaces, tabs,
+// newlines, single quotes, or backslashes).
 func pgQuoteValue(v string) string {
 	if v == "" || strings.ContainsAny(v, " \t\n\\'") {
 		v = strings.ReplaceAll(v, `\`, `\\`)
