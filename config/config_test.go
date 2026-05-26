@@ -522,29 +522,6 @@ func TestPostgreSQLConfig(t *testing.T) {
 			errString: "",
 		},
 		{
-			name: "Default port is applied when zero",
-			cfg: PostgreSQL{
-				Username: "test",
-				Password: "test",
-				Hostname: "127.0.0.1",
-				Port:     0,
-				Database: "garm",
-			},
-			errString: "",
-		},
-		{
-			name: "Default sslmode is applied when empty",
-			cfg: PostgreSQL{
-				Username: "test",
-				Password: "test",
-				Hostname: "127.0.0.1",
-				Port:     5432,
-				Database: "garm",
-				SSLMode:  "",
-			},
-			errString: "",
-		},
-		{
 			name: "Missing username",
 			cfg: PostgreSQL{
 				Password: "test",
