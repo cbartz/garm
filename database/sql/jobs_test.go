@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/suite"
 
+	"github.com/cloudbase/garm/config"
 	dbCommon "github.com/cloudbase/garm/database/common"
 	"github.com/cloudbase/garm/database/watcher"
 	garmTesting "github.com/cloudbase/garm/internal/testing"
@@ -32,6 +33,7 @@ type JobsTestSuite struct {
 	suite.Suite
 	Store    dbCommon.Store
 	adminCtx context.Context
+	dbCfgFn  func(*testing.T) config.Database
 }
 
 func (s *JobsTestSuite) SetupTest() {
@@ -39,7 +41,7 @@ func (s *JobsTestSuite) SetupTest() {
 	watcher.InitWatcher(ctx)
 
 	// Create testing sqlite database
-	db, err := NewSQLDatabase(ctx, garmTesting.GetTestSqliteDBConfig(s.T()))
+	db, err := NewSQLDatabase(ctx, testDBConfig(s.dbCfgFn, s.T()))
 	if err != nil {
 		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
 	}
@@ -55,6 +57,11 @@ func (s *JobsTestSuite) TearDownTest() {
 
 func TestJobsTestSuite(t *testing.T) {
 	suite.Run(t, new(JobsTestSuite))
+	if cfg, ok := pgTestDBConfig(t); ok {
+		t.Run("postgresql", func(t *testing.T) {
+			suite.Run(t, &JobsTestSuite{dbCfgFn: func(*testing.T) config.Database { return cfg }})
+		})
+	}
 }
 
 // TestDeleteInactionableJobs verifies the deletion logic for jobs

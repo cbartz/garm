@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	commonParams "github.com/cloudbase/garm-provider-common/params"
+	"github.com/cloudbase/garm/config"
 	dbCommon "github.com/cloudbase/garm/database/common"
 	"github.com/cloudbase/garm/database/watcher"
 	garmTesting "github.com/cloudbase/garm/internal/testing"
@@ -34,6 +35,7 @@ type ScaleSetsTestSuite struct {
 	Store    dbCommon.Store
 	adminCtx context.Context
 	creds    params.ForgeCredentials
+	dbCfgFn  func(*testing.T) config.Database
 
 	org        params.Organization
 	repo       params.Repository
@@ -49,7 +51,7 @@ func (s *ScaleSetsTestSuite) SetupTest() {
 	ctx := context.Background()
 	watcher.InitWatcher(ctx)
 
-	db, err := NewSQLDatabase(context.Background(), garmTesting.GetTestSqliteDBConfig(s.T()))
+	db, err := NewSQLDatabase(context.Background(), testDBConfig(s.dbCfgFn, s.T()))
 	if err != nil {
 		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
 	}
@@ -365,4 +367,9 @@ func (s *ScaleSetsTestSuite) TestScaleSetOperations() {
 
 func TestScaleSetsTestSuite(t *testing.T) {
 	suite.Run(t, new(ScaleSetsTestSuite))
+	if cfg, ok := pgTestDBConfig(t); ok {
+		t.Run("postgresql", func(t *testing.T) {
+			suite.Run(t, &ScaleSetsTestSuite{dbCfgFn: func(*testing.T) config.Database { return cfg }})
+		})
+	}
 }

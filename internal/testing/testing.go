@@ -21,9 +21,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -191,6 +194,55 @@ func CreateTestGiteaCredentials(ctx context.Context, credsName string, db common
 		s.Fatalf("failed to create database object (%s): %v", credsName, err)
 	}
 	return newCreds
+}
+
+// GetTestPostgresDBConfig returns a PostgreSQL DB config for tests, reading the
+// connection URL from GARM_TEST_POSTGRES_DSN. The DSN must use the URL format:
+// postgres://user:password@host:port/dbname?sslmode=...
+// The test is skipped if the environment variable is not set.
+func GetTestPostgresDBConfig(t *testing.T) config.Database {
+	t.Helper()
+	dsn := os.Getenv("GARM_TEST_POSTGRES_DSN")
+	if dsn == "" {
+		t.Skip("GARM_TEST_POSTGRES_DSN not set")
+	}
+
+	u, err := url.Parse(dsn)
+	if err != nil {
+		t.Fatalf("invalid GARM_TEST_POSTGRES_DSN: %v", err)
+	}
+
+	host := u.Hostname()
+	port := 5432
+	if portStr := u.Port(); portStr != "" {
+		p, parseErr := strconv.Atoi(portStr)
+		if parseErr != nil {
+			t.Fatalf("invalid port in GARM_TEST_POSTGRES_DSN: %v", parseErr)
+		}
+		port = p
+	}
+
+	username := u.User.Username()
+	password, _ := u.User.Password()
+	dbName := strings.TrimPrefix(u.Path, "/")
+	sslMode := u.Query().Get("sslmode")
+	if sslMode == "" {
+		sslMode = "prefer"
+	}
+
+	return config.Database{
+		Debug:      false,
+		DbBackend:  config.PostgreSQLBackend,
+		Passphrase: encryptionPassphrase,
+		PostgreSQL: config.PostgreSQL{
+			Username: username,
+			Password: password,
+			Hostname: host,
+			Port:     port,
+			Database: dbName,
+			SSLMode:  sslMode,
+		},
+	}
 }
 
 func GetTestSqliteDBConfig(t *testing.T) config.Database {
