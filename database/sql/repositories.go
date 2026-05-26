@@ -260,7 +260,7 @@ func (s *sqlDatabase) GetRepositoryByID(ctx context.Context, repoID string) (par
 func (s *sqlDatabase) getRepo(_ context.Context, owner, name, endpointName string) (Repository, error) {
 	var repo Repository
 
-	q := s.conn.Where("name = ? COLLATE NOCASE and owner = ? COLLATE NOCASE and endpoint_name = ? COLLATE NOCASE", name, owner, endpointName).
+	q := s.conn.Where("LOWER(name) = LOWER(?) and LOWER(owner) = LOWER(?) and LOWER(endpoint_name) = LOWER(?)", name, owner, endpointName).
 		Preload("Credentials").
 		Preload("Credentials.Endpoint").
 		Preload("GiteaCredentials").

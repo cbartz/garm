@@ -282,7 +282,7 @@ func (s *sqlDatabase) getOrgByID(_ context.Context, db *gorm.DB, id string, prel
 func (s *sqlDatabase) getOrg(_ context.Context, name, endpointName string) (Organization, error) {
 	var org Organization
 
-	q := s.conn.Where("name = ? COLLATE NOCASE and endpoint_name = ? COLLATE NOCASE", name, endpointName).
+	q := s.conn.Where("LOWER(name) = LOWER(?) and LOWER(endpoint_name) = LOWER(?)", name, endpointName).
 		Preload("Credentials").
 		Preload("GiteaCredentials").
 		Preload("Credentials.Endpoint").

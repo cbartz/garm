@@ -39,7 +39,7 @@ func (s *sqlDatabase) CreateGiteaEndpoint(_ context.Context, param params.Create
 	}()
 	var endpoint GithubEndpoint
 	err = s.conn.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("name = ?", param.Name).First(&endpoint).Error; err == nil {
+		if err := tx.Where("LOWER(name) = LOWER(?)", param.Name).First(&endpoint).Error; err == nil {
 			return fmt.Errorf("gitea endpoint already exists: %w", runnerErrors.ErrDuplicateEntity)
 		}
 		endpoint = GithubEndpoint{
@@ -97,7 +97,7 @@ func (s *sqlDatabase) UpdateGiteaEndpoint(_ context.Context, name string, param 
 	}()
 	var endpoint GithubEndpoint
 	err = s.conn.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("name = ? and endpoint_type = ?", name, params.GiteaEndpointType).First(&endpoint).Error; err != nil {
+		if err := tx.Where("LOWER(name) = LOWER(?) and endpoint_type = ?", name, params.GiteaEndpointType).First(&endpoint).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return runnerErrors.NewNotFoundError("gitea endpoint %q not found", name)
 			}
@@ -166,7 +166,7 @@ func (s *sqlDatabase) UpdateGiteaEndpoint(_ context.Context, name string, param 
 
 func (s *sqlDatabase) GetGiteaEndpoint(_ context.Context, name string) (params.ForgeEndpoint, error) {
 	var endpoint GithubEndpoint
-	err := s.conn.Where("name = ? and endpoint_type = ?", name, params.GiteaEndpointType).First(&endpoint).Error
+	err := s.conn.Where("LOWER(name) = LOWER(?) and endpoint_type = ?", name, params.GiteaEndpointType).First(&endpoint).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return params.ForgeEndpoint{}, runnerErrors.NewNotFoundError("gitea endpoint %q not found", name)
@@ -185,7 +185,7 @@ func (s *sqlDatabase) DeleteGiteaEndpoint(_ context.Context, name string) (err e
 	}()
 	err = s.conn.Transaction(func(tx *gorm.DB) error {
 		var endpoint GithubEndpoint
-		if err := tx.Where("name = ? and endpoint_type = ?", name, params.GiteaEndpointType).First(&endpoint).Error; err != nil {
+		if err := tx.Where("LOWER(name) = LOWER(?) and endpoint_type = ?", name, params.GiteaEndpointType).First(&endpoint).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil
 			}
@@ -245,14 +245,14 @@ func (s *sqlDatabase) CreateGiteaCredentials(ctx context.Context, param params.C
 	var creds GiteaCredentials
 	err = s.conn.Transaction(func(tx *gorm.DB) error {
 		var endpoint GithubEndpoint
-		if err := tx.Where("name = ? and endpoint_type = ?", param.Endpoint, params.GiteaEndpointType).First(&endpoint).Error; err != nil {
+		if err := tx.Where("LOWER(name) = LOWER(?) and endpoint_type = ?", param.Endpoint, params.GiteaEndpointType).First(&endpoint).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return runnerErrors.NewNotFoundError("gitea endpoint %q not found", param.Endpoint)
 			}
 			return fmt.Errorf("error fetching gitea endpoint: %w", err)
 		}
 
-		if err := tx.Where("name = ? and user_id = ?", param.Name, userID).First(&creds).Error; err == nil {
+		if err := tx.Where("LOWER(name) = LOWER(?) and user_id = ?", param.Name, userID).First(&creds).Error; err == nil {
 			return fmt.Errorf("gitea credentials already exists: %w", runnerErrors.ErrDuplicateEntity)
 		}
 
@@ -315,7 +315,7 @@ func (s *sqlDatabase) getGiteaCredentialsByName(ctx context.Context, tx *gorm.DB
 	}
 	q = q.Where("user_id = ?", userID)
 
-	err = q.Where("name = ?", name).First(&creds).Error
+	err = q.Where("LOWER(name) = LOWER(?)", name).First(&creds).Error
 	if err != nil {
 		if errors.Is(err, gorm.ErrRecordNotFound) {
 			return GiteaCredentials{}, runnerErrors.NewNotFoundError("gitea credentials %q not found", name)
