@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -49,6 +50,8 @@ const (
 	MySQLBackend DBBackendType = "mysql"
 	// SQLiteBackend represents the SQLite3 DB backend
 	SQLiteBackend DBBackendType = "sqlite3"
+	// PostgreSQLBackend represents the PostgreSQL DB backend
+	PostgreSQLBackend DBBackendType = "postgresql"
 	// EnvironmentVariablePrefix is the prefix for all environment variables
 	// that can not be used to get overwritten via the external provider
 	EnvironmentVariablePrefix = "GARM"
@@ -479,6 +482,7 @@ type Database struct {
 	DbBackend DBBackendType `toml:"backend" json:"backend"`
 	MySQL     MySQL         `toml:"mysql" json:"mysql"`
 	SQLite    SQLite        `toml:"sqlite3" json:"sqlite3"`
+	PostgreSQL PostgreSQL   `toml:"postgresql" json:"postgresql"`
 	// Passphrase is used to encrypt any sensitive info before
 	// inserting it into the database. This is just temporary until
 	// we move to something like vault or barbican for secrets storage.
@@ -508,6 +512,11 @@ func (d *Database) GormParams() (dbType DBBackendType, uri string, err error) {
 		uri, err = d.SQLite.ConnectionString()
 		if err != nil {
 			return "", "", fmt.Errorf("error fetching sqlite3 connection string: %w", err)
+		}
+	case PostgreSQLBackend:
+		uri, err = d.PostgreSQL.ConnectionString()
+		if err != nil {
+			return "", "", fmt.Errorf("error fetching postgresql connection string: %w", err)
 		}
 	default:
 		return "", "", fmt.Errorf("invalid database backend: %s", dbType)
@@ -559,6 +568,10 @@ func (d *Database) Validate() error {
 	case SQLiteBackend:
 		if err := d.SQLite.Validate(); err != nil {
 			return fmt.Errorf("validating sqlite3 config: %w", err)
+		}
+	case PostgreSQLBackend:
+		if err := d.PostgreSQL.Validate(); err != nil {
+			return fmt.Errorf("validating postgresql config: %w", err)
 		}
 	default:
 		return fmt.Errorf("invalid database backend: %s", d.DbBackend)
@@ -642,6 +655,70 @@ func (m *MySQL) ConnectionString() (string, error) {
 		m.Hostname, m.DatabaseName,
 	)
 	return connString, nil
+}
+
+// PostgreSQL is the config entry for the postgresql section
+type PostgreSQL struct {
+	Username string `toml:"username" json:"username"`
+	Password string `toml:"password" json:"password"`
+	Hostname string `toml:"hostname" json:"hostname"`
+	Port     int    `toml:"port"     json:"port"`
+	Database string `toml:"database" json:"database"`
+	SSLMode  string `toml:"sslmode"  json:"sslmode"`
+}
+
+// Validate validates a PostgreSQL config entry and applies defaults for optional fields.
+func (p *PostgreSQL) Validate() error {
+	if p.Username == "" {
+		return fmt.Errorf("username is required")
+	}
+	if p.Password == "" {
+		return fmt.Errorf("password is required")
+	}
+	if p.Hostname == "" {
+		return fmt.Errorf("hostname is required")
+	}
+	if p.Database == "" {
+		return fmt.Errorf("database is required")
+	}
+	if p.Port == 0 {
+		p.Port = 5432
+	}
+	if p.Port < 1 || p.Port > 65535 {
+		return fmt.Errorf("invalid port %d: must be between 1 and 65535", p.Port)
+	}
+	if p.SSLMode == "" {
+		p.SSLMode = "prefer"
+	}
+	switch p.SSLMode {
+	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
+	default:
+		return fmt.Errorf("invalid sslmode %q: must be one of disable, allow, prefer, require, verify-ca, verify-full", p.SSLMode)
+	}
+	return nil
+}
+
+// ConnectionString returns a pgx-compatible DSN in libpq key=value format.
+func (p *PostgreSQL) ConnectionString() (string, error) {
+	if err := p.Validate(); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		pgQuoteValue(p.Hostname), p.Port, pgQuoteValue(p.Username), pgQuoteValue(p.Password), pgQuoteValue(p.Database), pgQuoteValue(p.SSLMode),
+	), nil
+}
+
+// pgQuoteValue quotes a connection string value if it contains characters that
+// require quoting in the libpq key=value format (empty string, spaces, tabs,
+// newlines, single quotes, or backslashes).
+func pgQuoteValue(v string) string {
+	if v == "" || strings.ContainsAny(v, " \t\n\\'") {
+		v = strings.ReplaceAll(v, `\`, `\\`)
+		v = strings.ReplaceAll(v, `'`, `\'`)
+		return "'" + v + "'"
+	}
+	return v
 }
 
 // TLSConfig is the API server TLS config
