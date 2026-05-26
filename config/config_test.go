@@ -580,6 +580,39 @@ func TestPostgreSQLConfig(t *testing.T) {
 			},
 			errString: "database is required",
 		},
+		{
+			name: "Port is negative",
+			cfg: PostgreSQL{
+				Username: "test",
+				Password: "test",
+				Hostname: "127.0.0.1",
+				Port:     -1,
+				Database: "garm",
+			},
+			errString: "invalid port",
+		},
+		{
+			name: "Port exceeds maximum",
+			cfg: PostgreSQL{
+				Username: "test",
+				Password: "test",
+				Hostname: "127.0.0.1",
+				Port:     65536,
+				Database: "garm",
+			},
+			errString: "invalid port",
+		},
+		{
+			name: "SSLMode is invalid",
+			cfg: PostgreSQL{
+				Username: "test",
+				Password: "test",
+				Hostname: "127.0.0.1",
+				Database: "garm",
+				SSLMode:  "bogus",
+			},
+			errString: "invalid sslmode",
+		},
 	}
 
 	for _, tc := range tests {
@@ -628,6 +661,48 @@ func TestPostgreSQLConnectionStringDefaultsApplied(t *testing.T) {
 	connStr, err := cfg.ConnectionString()
 	require.Nil(t, err)
 	require.Equal(t, "host=127.0.0.1 port=5432 user=test password=test dbname=garm sslmode=disable", connStr)
+}
+
+func TestPostgreSQLConnectionStringSpecialChars(t *testing.T) {
+	base := PostgreSQL{
+		Username: "test",
+		Hostname: "127.0.0.1",
+		Port:     5432,
+		Database: "garm",
+		SSLMode:  "disable",
+	}
+
+	tests := []struct {
+		name     string
+		password string
+		expected string
+	}{
+		{
+			name:     "Password with space",
+			password: "my pass",
+			expected: "host=127.0.0.1 port=5432 user=test password='my pass' dbname=garm sslmode=disable",
+		},
+		{
+			name:     "Password with single quote",
+			password: "pass'word",
+			expected: `host=127.0.0.1 port=5432 user=test password='pass\'word' dbname=garm sslmode=disable`,
+		},
+		{
+			name:     "Password with backslash",
+			password: `pass\word`,
+			expected: `host=127.0.0.1 port=5432 user=test password='pass\\word' dbname=garm sslmode=disable`,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg := base
+			cfg.Password = tc.password
+			connStr, err := cfg.ConnectionString()
+			require.Nil(t, err)
+			require.Equal(t, tc.expected, connStr)
+		})
+	}
 }
 
 func TestJWTAuthConfig(t *testing.T) {

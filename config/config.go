@@ -26,6 +26,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/BurntSushi/toml"
@@ -683,21 +684,43 @@ func (p *PostgreSQL) Validate() error {
 	if p.Port == 0 {
 		p.Port = 5432
 	}
+	if p.Port < 1 || p.Port > 65535 {
+		return fmt.Errorf("invalid port %d: must be between 1 and 65535", p.Port)
+	}
 	if p.SSLMode == "" {
 		p.SSLMode = "disable"
+	}
+	validSSLModes := map[string]struct{}{
+		"disable": {}, "allow": {}, "prefer": {}, "require": {}, "verify-ca": {}, "verify-full": {},
+	}
+	if _, ok := validSSLModes[p.SSLMode]; !ok {
+		return fmt.Errorf("invalid sslmode %q: must be one of disable, allow, prefer, require, verify-ca, verify-full", p.SSLMode)
 	}
 	return nil
 }
 
 // ConnectionString returns a pgx-compatible DSN.
+// Values containing spaces, single quotes, or backslashes are single-quoted
+// per the libpq key=value connection string format.
 func (p *PostgreSQL) ConnectionString() (string, error) {
 	if err := p.Validate(); err != nil {
 		return "", err
 	}
 	return fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
-		p.Hostname, p.Port, p.Username, p.Password, p.Database, p.SSLMode,
+		pgQuoteValue(p.Hostname), p.Port, pgQuoteValue(p.Username), pgQuoteValue(p.Password), pgQuoteValue(p.Database), pgQuoteValue(p.SSLMode),
 	), nil
+}
+
+// pgQuoteValue quotes a connection string value if it contains characters that
+// require quoting in the libpq key=value format (spaces, single quotes, backslashes).
+func pgQuoteValue(v string) string {
+	if v == "" || strings.ContainsAny(v, " \t\n\\'") {
+		v = strings.ReplaceAll(v, `\`, `\\`)
+		v = strings.ReplaceAll(v, `'`, `\'`)
+		return "'" + v + "'"
+	}
+	return v
 }
 
 // TLSConfig is the API server TLS config
