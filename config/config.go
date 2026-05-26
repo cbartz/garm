@@ -688,7 +688,7 @@ func (p *PostgreSQL) Validate() error {
 		return fmt.Errorf("invalid port %d: must be between 1 and 65535", p.Port)
 	}
 	if p.SSLMode == "" {
-		p.SSLMode = "disable"
+		p.SSLMode = "prefer"
 	}
 	switch p.SSLMode {
 	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":

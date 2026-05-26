@@ -639,7 +639,7 @@ func TestPostgreSQLConfigDefaultsApplied(t *testing.T) {
 	err := cfg.Validate()
 	require.Nil(t, err)
 	require.Equal(t, 5432, cfg.Port)
-	require.Equal(t, "disable", cfg.SSLMode)
+	require.Equal(t, "prefer", cfg.SSLMode)
 }
 
 func TestPostgreSQLConnectionString(t *testing.T) {
@@ -660,7 +660,7 @@ func TestPostgreSQLConnectionStringDefaultsApplied(t *testing.T) {
 
 	connStr, err := cfg.ConnectionString()
 	require.Nil(t, err)
-	require.Equal(t, "host=127.0.0.1 port=5432 user=test password=test dbname=garm sslmode=disable", connStr)
+	require.Equal(t, "host=127.0.0.1 port=5432 user=test password=test dbname=garm sslmode=prefer", connStr)
 }
 
 func TestPostgreSQLConnectionStringSpecialChars(t *testing.T) {
