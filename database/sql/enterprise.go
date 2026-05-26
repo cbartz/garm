@@ -253,7 +253,7 @@ func (s *sqlDatabase) UpdateEnterprise(ctx context.Context, enterpriseID string,
 func (s *sqlDatabase) getEnterprise(_ context.Context, name, endpointName string) (Enterprise, error) {
 	var enterprise Enterprise
 
-	q := s.conn.Where("name = ? COLLATE NOCASE and endpoint_name = ? COLLATE NOCASE", name, endpointName).
+	q := s.conn.Where("LOWER(name) = LOWER(?) and LOWER(endpoint_name) = LOWER(?)", name, endpointName).
 		Preload("Credentials").
 		Preload("Credentials.Endpoint").
 		Preload("Endpoint").

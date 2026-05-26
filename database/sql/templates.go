@@ -45,7 +45,7 @@ func (s *sqlDatabase) ListTemplates(ctx context.Context, osType *commonParams.OS
 	}
 
 	if partialName != nil {
-		q = q.Where("name like ? COLLATE NOCASE", fmt.Sprintf("%%%s%%", *partialName))
+		q = q.Where("LOWER(name) LIKE LOWER(?)", fmt.Sprintf("%%%s%%", *partialName))
 	}
 
 	if forgeType != nil {
