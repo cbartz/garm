@@ -49,6 +49,8 @@ const (
 	MySQLBackend DBBackendType = "mysql"
 	// SQLiteBackend represents the SQLite3 DB backend
 	SQLiteBackend DBBackendType = "sqlite3"
+	// PostgreSQLBackend represents the PostgreSQL DB backend
+	PostgreSQLBackend DBBackendType = "postgresql"
 	// EnvironmentVariablePrefix is the prefix for all environment variables
 	// that can not be used to get overwritten via the external provider
 	EnvironmentVariablePrefix = "GARM"
@@ -479,6 +481,7 @@ type Database struct {
 	DbBackend DBBackendType `toml:"backend" json:"backend"`
 	MySQL     MySQL         `toml:"mysql" json:"mysql"`
 	SQLite    SQLite        `toml:"sqlite3" json:"sqlite3"`
+	Postgres  PostgreSQL    `toml:"postgresql" json:"postgresql"`
 	// Passphrase is used to encrypt any sensitive info before
 	// inserting it into the database. This is just temporary until
 	// we move to something like vault or barbican for secrets storage.
@@ -508,6 +511,11 @@ func (d *Database) GormParams() (dbType DBBackendType, uri string, err error) {
 		uri, err = d.SQLite.ConnectionString()
 		if err != nil {
 			return "", "", fmt.Errorf("error fetching sqlite3 connection string: %w", err)
+		}
+	case PostgreSQLBackend:
+		uri, err = d.Postgres.ConnectionString()
+		if err != nil {
+			return "", "", fmt.Errorf("error fetching postgresql connection string: %w", err)
 		}
 	default:
 		return "", "", fmt.Errorf("invalid database backend: %s", dbType)
@@ -559,6 +567,10 @@ func (d *Database) Validate() error {
 	case SQLiteBackend:
 		if err := d.SQLite.Validate(); err != nil {
 			return fmt.Errorf("validating sqlite3 config: %w", err)
+		}
+	case PostgreSQLBackend:
+		if err := d.Postgres.Validate(); err != nil {
+			return fmt.Errorf("validating postgresql config: %w", err)
 		}
 	default:
 		return fmt.Errorf("invalid database backend: %s", d.DbBackend)
@@ -642,6 +654,50 @@ func (m *MySQL) ConnectionString() (string, error) {
 		m.Hostname, m.DatabaseName,
 	)
 	return connString, nil
+}
+
+// PostgreSQL is the config entry for the postgresql section
+type PostgreSQL struct {
+	Username string `toml:"username" json:"username"`
+	Password string `toml:"password" json:"password"`
+	Hostname string `toml:"hostname" json:"hostname"`
+	Port     int    `toml:"port"     json:"port"`
+	Database string `toml:"database" json:"database"`
+	SSLMode  string `toml:"sslmode"  json:"sslmode"`
+}
+
+// Validate validates a PostgreSQL config entry and applies defaults for optional fields.
+func (p *PostgreSQL) Validate() error {
+	if p.Username == "" {
+		return fmt.Errorf("username is required")
+	}
+	if p.Password == "" {
+		return fmt.Errorf("password is required")
+	}
+	if p.Hostname == "" {
+		return fmt.Errorf("hostname is required")
+	}
+	if p.Database == "" {
+		return fmt.Errorf("database is required")
+	}
+	if p.Port == 0 {
+		p.Port = 5432
+	}
+	if p.SSLMode == "" {
+		p.SSLMode = "disable"
+	}
+	return nil
+}
+
+// ConnectionString returns a pgx-compatible DSN.
+func (p *PostgreSQL) ConnectionString() (string, error) {
+	if err := p.Validate(); err != nil {
+		return "", err
+	}
+	return fmt.Sprintf(
+		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
+		p.Hostname, p.Port, p.Username, p.Password, p.Database, p.SSLMode,
+	), nil
 }
 
 // TLSConfig is the API server TLS config

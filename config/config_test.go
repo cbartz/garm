@@ -68,6 +68,17 @@ func getMySQLDefaultConfig() MySQL {
 	}
 }
 
+func getPostgresDefaultConfig() PostgreSQL {
+	return PostgreSQL{
+		Username: "test",
+		Password: "test",
+		Hostname: "127.0.0.1",
+		Port:     5432,
+		Database: "garm",
+		SSLMode:  "disable",
+	}
+}
+
 func getDefaultDatabaseConfig(dir string) Database {
 	return Database{
 		Debug:     false,
@@ -371,6 +382,24 @@ func TestDatabaseConfig(t *testing.T) {
 			},
 			errString: "",
 		},
+		{
+			name: "postgresql backend is misconfigured",
+			cfg: Database{
+				DbBackend:  PostgreSQLBackend,
+				Postgres:   PostgreSQL{},
+				Passphrase: cfg.Passphrase,
+			},
+			errString: "validating postgresql config: username is required",
+		},
+		{
+			name: "postgresql backend is configured and valid",
+			cfg: Database{
+				DbBackend:  PostgreSQLBackend,
+				Postgres:   getPostgresDefaultConfig(),
+				Passphrase: cfg.Passphrase,
+			},
+			errString: "",
+		},
 	}
 
 	for _, tc := range tests {
@@ -413,6 +442,15 @@ func TestGormParams(t *testing.T) {
 	require.Nil(t, err)
 	require.Equal(t, MySQLBackend, dbType)
 	require.Equal(t, "test:test@tcp(127.0.0.1)/garm?charset=utf8&parseTime=True&loc=Local&timeout=5s", uri)
+
+	cfg.DbBackend = PostgreSQLBackend
+	cfg.MySQL = MySQL{}
+	cfg.Postgres = getPostgresDefaultConfig()
+
+	dbType, uri, err = cfg.GormParams()
+	require.Nil(t, err)
+	require.Equal(t, PostgreSQLBackend, dbType)
+	require.Equal(t, "host=127.0.0.1 port=5432 user=test password=test dbname=garm sslmode=disable", uri)
 }
 
 func TestSQLiteConfig(t *testing.T) {
@@ -468,6 +506,128 @@ func TestSQLiteConfig(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPostgreSQLConfig(t *testing.T) {
+	cfg := getPostgresDefaultConfig()
+
+	tests := []struct {
+		name      string
+		cfg       PostgreSQL
+		errString string
+	}{
+		{
+			name:      "Config is valid",
+			cfg:       cfg,
+			errString: "",
+		},
+		{
+			name: "Default port is applied when zero",
+			cfg: PostgreSQL{
+				Username: "test",
+				Password: "test",
+				Hostname: "127.0.0.1",
+				Port:     0,
+				Database: "garm",
+			},
+			errString: "",
+		},
+		{
+			name: "Default sslmode is applied when empty",
+			cfg: PostgreSQL{
+				Username: "test",
+				Password: "test",
+				Hostname: "127.0.0.1",
+				Port:     5432,
+				Database: "garm",
+				SSLMode:  "",
+			},
+			errString: "",
+		},
+		{
+			name: "Missing username",
+			cfg: PostgreSQL{
+				Password: "test",
+				Hostname: "127.0.0.1",
+				Database: "garm",
+			},
+			errString: "username is required",
+		},
+		{
+			name: "Missing password",
+			cfg: PostgreSQL{
+				Username: "test",
+				Hostname: "127.0.0.1",
+				Database: "garm",
+			},
+			errString: "password is required",
+		},
+		{
+			name: "Missing hostname",
+			cfg: PostgreSQL{
+				Username: "test",
+				Password: "test",
+				Database: "garm",
+			},
+			errString: "hostname is required",
+		},
+		{
+			name: "Missing database",
+			cfg: PostgreSQL{
+				Username: "test",
+				Password: "test",
+				Hostname: "127.0.0.1",
+			},
+			errString: "database is required",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.cfg.Validate()
+			if tc.errString == "" {
+				require.Nil(t, err)
+			} else {
+				require.NotNil(t, err)
+				require.Regexp(t, tc.errString, err.Error())
+			}
+		})
+	}
+}
+
+func TestPostgreSQLConfigDefaultsApplied(t *testing.T) {
+	cfg := PostgreSQL{
+		Username: "test",
+		Password: "test",
+		Hostname: "127.0.0.1",
+		Database: "garm",
+	}
+
+	err := cfg.Validate()
+	require.Nil(t, err)
+	require.Equal(t, 5432, cfg.Port)
+	require.Equal(t, "disable", cfg.SSLMode)
+}
+
+func TestPostgreSQLConnectionString(t *testing.T) {
+	cfg := getPostgresDefaultConfig()
+
+	connStr, err := cfg.ConnectionString()
+	require.Nil(t, err)
+	require.Equal(t, "host=127.0.0.1 port=5432 user=test password=test dbname=garm sslmode=disable", connStr)
+}
+
+func TestPostgreSQLConnectionStringDefaultsApplied(t *testing.T) {
+	cfg := PostgreSQL{
+		Username: "test",
+		Password: "test",
+		Hostname: "127.0.0.1",
+		Database: "garm",
+	}
+
+	connStr, err := cfg.ConnectionString()
+	require.Nil(t, err)
+	require.Equal(t, "host=127.0.0.1 port=5432 user=test password=test dbname=garm sslmode=disable", connStr)
 }
 
 func TestJWTAuthConfig(t *testing.T) {
