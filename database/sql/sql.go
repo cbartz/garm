@@ -227,12 +227,6 @@ func (s *sqlDatabase) migrateFileObjects() error {
 	if s.objectsConn == nil {
 		return nil
 	}
-	// File-object storage uses SQLite-specific DDL (COLLATE NOCASE, zeroblob).
-	// PostgreSQL support is deferred to a follow-up; skip migration on that dialect.
-	if s.objectsConn.Dialector.Name() == "postgres" {
-		return nil
-	}
-
 	// Use a distinct migrations table so the file-object migration history
 	// does not collide with the main migrations table when both run on the
 	// same database connection (e.g. PostgreSQL).

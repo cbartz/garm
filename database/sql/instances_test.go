@@ -18,7 +18,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"os"
 	"regexp"
 	"sort"
 	"sync"
@@ -292,9 +291,6 @@ func (s *InstancesTestSuite) TestCreateInstanceMaxRunnersReachedSpecificPool() {
 }
 
 func (s *InstancesTestSuite) TestCreateInstanceConcurrentMaxRunnersRaceCondition() {
-	if os.Getenv("GARM_TEST_POSTGRES_DSN") != "" {
-		s.T().Skip("SQLite immediate-lock semantics test; Postgres uses MVCC and requires application-level serialization for this guarantee")
-	}
 	// Create a new pool with max runners set to 15, starting from 0
 	createPoolParams := params.CreatePoolParams{
 		ProviderName:   "test-provider",
