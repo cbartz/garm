@@ -42,7 +42,7 @@ func (s *sqlDatabase) CreateInstance(ctx context.Context, poolID string, param p
 	}()
 
 	err = s.conn.Transaction(func(tx *gorm.DB) error {
-		pool, err := s.getPoolByID(tx, poolID)
+		pool, err := s.getPoolByIDForUpdate(tx, poolID)
 		if err != nil {
 			return fmt.Errorf("error fetching pool: %w", err)
 		}
