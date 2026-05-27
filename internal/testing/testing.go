@@ -19,6 +19,7 @@ package testing
 
 import (
 	"context"
+	dbsql "database/sql"
 	"errors"
 	"fmt"
 	"net/url"
@@ -29,6 +30,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/require"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
@@ -37,6 +39,8 @@ import (
 	"github.com/cloudbase/garm/database/common"
 	"github.com/cloudbase/garm/params"
 	"github.com/cloudbase/garm/util/appdefaults"
+
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 //nolint:golangci-lint,gosec
@@ -200,14 +204,38 @@ func CreateTestGiteaCredentials(ctx context.Context, credsName string, db common
 // connection URL from GARM_TEST_POSTGRES_DSN. The DSN must use the URL format:
 // postgres://user:password@host:port/dbname?sslmode=...
 // The test is skipped if the environment variable is not set.
+//
+// Each call creates a unique schema and registers a t.Cleanup that drops it,
+// so tests are fully isolated from each other even when sharing one PostgreSQL instance.
 func GetTestPostgresDBConfig(t *testing.T) config.Database {
 	t.Helper()
-	dsn := os.Getenv("GARM_TEST_POSTGRES_DSN")
-	if dsn == "" {
+	baseDSN := os.Getenv("GARM_TEST_POSTGRES_DSN")
+	if baseDSN == "" {
 		t.Skip("GARM_TEST_POSTGRES_DSN not set")
 	}
 
-	u, err := url.Parse(dsn)
+	schemaName := "garm_test_" + strings.ReplaceAll(uuid.New().String(), "-", "_")
+
+	db, err := dbsql.Open("pgx", baseDSN)
+	if err != nil {
+		t.Fatalf("failed to open postgres connection for schema setup: %v", err)
+	}
+	if _, err := db.Exec("CREATE SCHEMA " + schemaName); err != nil {
+		db.Close()
+		t.Fatalf("failed to create test schema %s: %v", schemaName, err)
+	}
+	db.Close()
+
+	t.Cleanup(func() {
+		conn, err := dbsql.Open("pgx", baseDSN)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		conn.Exec("DROP SCHEMA " + schemaName + " CASCADE") //nolint:errcheck
+	})
+
+	u, err := url.Parse(baseDSN)
 	if err != nil {
 		t.Fatalf("invalid GARM_TEST_POSTGRES_DSN: %v", err)
 	}
@@ -235,12 +263,13 @@ func GetTestPostgresDBConfig(t *testing.T) config.Database {
 		DbBackend:  config.PostgreSQLBackend,
 		Passphrase: encryptionPassphrase,
 		PostgreSQL: config.PostgreSQL{
-			Username: username,
-			Password: password,
-			Hostname: host,
-			Port:     port,
-			Database: dbName,
-			SSLMode:  sslMode,
+			Username:     username,
+			Password:     password,
+			Hostname:     host,
+			Port:         port,
+			Database:     dbName,
+			SSLMode:      sslMode,
+			ExtraOptions: "options='-c search_path=" + schemaName + "'",
 		},
 	}
 }
