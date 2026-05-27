@@ -55,6 +55,7 @@ type RepoTestSuite struct {
 	StoreSQLMocked *sqlDatabase
 	Fixtures       *RepoTestFixtures
 
+
 	adminCtx    context.Context
 	adminUserID string
 
@@ -99,7 +100,7 @@ func (s *RepoTestSuite) SetupTest() {
 	ctx := context.Background()
 	watcher.InitWatcher(ctx)
 
-	db, err := NewSQLDatabase(context.Background(), garmTesting.GetTestSqliteDBConfig(s.T()))
+	db, err := NewSQLDatabase(context.Background(), testDBConfig(s.T()))
 	if err != nil {
 		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
 	}

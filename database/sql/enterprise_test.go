@@ -51,6 +51,7 @@ type EnterpriseTestSuite struct {
 	StoreSQLMocked *sqlDatabase
 	Fixtures       *EnterpriseTestFixtures
 
+
 	adminCtx    context.Context
 	adminUserID string
 
@@ -86,8 +87,8 @@ func (s *EnterpriseTestSuite) TearDownTest() {
 func (s *EnterpriseTestSuite) SetupTest() {
 	ctx := context.Background()
 	watcher.InitWatcher(ctx)
-	// create testing sqlite database
-	db, err := NewSQLDatabase(ctx, garmTesting.GetTestSqliteDBConfig(s.T()))
+	// create testing database
+	db, err := NewSQLDatabase(ctx, testDBConfig(s.T()))
 	if err != nil {
 		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
 	}

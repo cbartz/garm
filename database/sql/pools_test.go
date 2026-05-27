@@ -49,6 +49,7 @@ type PoolsTestSuite struct {
 	StoreSQLMocked *sqlDatabase
 	Fixtures       *PoolsTestFixtures
 	adminCtx       context.Context
+
 }
 
 func (s *PoolsTestSuite) assertSQLMockExpectations() {
@@ -67,7 +68,7 @@ func (s *PoolsTestSuite) SetupTest() {
 	ctx := context.Background()
 	watcher.InitWatcher(ctx)
 
-	db, err := NewSQLDatabase(context.Background(), garmTesting.GetTestSqliteDBConfig(s.T()))
+	db, err := NewSQLDatabase(context.Background(), testDBConfig(s.T()))
 	if err != nil {
 		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
 	}

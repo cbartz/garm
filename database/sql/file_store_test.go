@@ -42,6 +42,7 @@ type FileStoreTestSuite struct {
 	ctx      context.Context
 	adminCtx context.Context
 	Fixtures *FileStoreTestFixtures
+
 }
 
 func (s *FileStoreTestSuite) TearDownTest() {
@@ -52,7 +53,7 @@ func (s *FileStoreTestSuite) SetupTest() {
 	ctx := context.Background()
 	watcher.InitWatcher(ctx)
 
-	db, err := NewSQLDatabase(context.Background(), garmTesting.GetTestSqliteDBConfig(s.T()))
+	db, err := NewSQLDatabase(context.Background(), testDBConfig(s.T()))
 	if err != nil {
 		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
 	}

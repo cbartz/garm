@@ -39,7 +39,7 @@ func (s *JobsTestSuite) SetupTest() {
 	watcher.InitWatcher(ctx)
 
 	// Create testing sqlite database
-	db, err := NewSQLDatabase(ctx, garmTesting.GetTestSqliteDBConfig(s.T()))
+	db, err := NewSQLDatabase(ctx, testDBConfig(s.T()))
 	if err != nil {
 		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
 	}

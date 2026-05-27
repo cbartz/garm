@@ -51,6 +51,7 @@ type InstancesTestSuite struct {
 	StoreSQLMocked *sqlDatabase
 	Fixtures       *InstancesTestFixtures
 	adminCtx       context.Context
+
 }
 
 func (s *InstancesTestSuite) equalInstancesByName(expected, actual []params.Instance) {
@@ -79,7 +80,7 @@ func (s *InstancesTestSuite) SetupTest() {
 	ctx := context.Background()
 	watcher.InitWatcher(ctx)
 	// create testing sqlite database
-	db, err := NewSQLDatabase(ctx, garmTesting.GetTestSqliteDBConfig(s.T()))
+	db, err := NewSQLDatabase(ctx, testDBConfig(s.T()))
 	if err != nil {
 		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
 	}

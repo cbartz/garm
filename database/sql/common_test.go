@@ -14,8 +14,26 @@
 
 package sql
 
+import (
+	"os"
+	"testing"
+
+	"github.com/cloudbase/garm/config"
+	garmTesting "github.com/cloudbase/garm/internal/testing"
+)
+
 const (
 	wrongPassphrase = "wrong-passphrase"
 	webhookSecret   = "webhook-secret"
 	falseString     = "false"
 )
+
+// testDBConfig returns the database config for a suite test case.
+// Returns a PostgreSQL config when GARM_TEST_POSTGRES_DSN is set,
+// otherwise a fresh per-test SQLite database.
+func testDBConfig(t *testing.T) config.Database {
+	if os.Getenv("GARM_TEST_POSTGRES_DSN") != "" {
+		return garmTesting.GetTestPostgresDBConfig(t)
+	}
+	return garmTesting.GetTestSqliteDBConfig(t)
+}
