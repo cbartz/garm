@@ -282,7 +282,7 @@ func (s *sqlDatabase) DeleteFileObjectsByTags(_ context.Context, tags []string) 
 		// Build query to find all file objects matching ALL tags
 		query := tx.Model(&FileObject{}).Preload("TagsList").Omit("content")
 		for _, tag := range tags {
-			query = query.Where("EXISTS (SELECT 1 FROM file_object_tags WHERE file_object_tags.file_object_id = file_objects.id AND file_object_tags.tag = ?)", tag)
+			query = query.Where("EXISTS (SELECT 1 FROM file_object_tags WHERE file_object_tags.file_object_id = file_objects.id AND LOWER(file_object_tags.tag) = LOWER(?))", tag)
 		}
 
 		// Get matching objects with their full details (except content blob)
@@ -350,7 +350,7 @@ func (s *sqlDatabase) SearchFileObjectByTags(_ context.Context, tags []string, p
 	var fileObjectRes []FileObject
 	query := s.objectsConn.Model(&FileObject{}).Preload("TagsList").Omit("content")
 	for _, t := range tags {
-		query = query.Where("EXISTS (SELECT 1 FROM file_object_tags WHERE file_object_tags.file_object_id = file_objects.id AND file_object_tags.tag = ?)", t)
+		query = query.Where("EXISTS (SELECT 1 FROM file_object_tags WHERE file_object_tags.file_object_id = file_objects.id AND LOWER(file_object_tags.tag) = LOWER(?))", t)
 	}
 
 	var total int64
