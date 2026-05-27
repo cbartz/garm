@@ -665,6 +665,10 @@ type PostgreSQL struct {
 	Port         int    `toml:"port"          json:"port"`
 	Database     string `toml:"database"      json:"database"`
 	SSLMode      string `toml:"sslmode"       json:"sslmode"`
+	// ExtraOptions is appended verbatim to the libpq connection string.
+	// Use standard key=value pairs (e.g. "options='-c search_path=myschema'").
+	// Keys already present in the DSN (host, port, user, password, dbname, sslmode)
+	// should not be repeated here.
 	ExtraOptions string `toml:"extra_options" json:"extra_options"`
 }
 

@@ -640,6 +640,25 @@ func TestPostgreSQLConnectionStringDefaultsApplied(t *testing.T) {
 	require.Equal(t, "host=127.0.0.1 port=5432 user=test password=test dbname=garm sslmode=prefer", connStr)
 }
 
+func TestPostgreSQLConnectionStringExtraOptions(t *testing.T) {
+	base := getPostgresDefaultConfig()
+
+	t.Run("ExtraOptions empty", func(t *testing.T) {
+		cfg := base
+		connStr, err := cfg.ConnectionString()
+		require.Nil(t, err)
+		require.Equal(t, "host=127.0.0.1 port=5432 user=test password=test dbname=garm sslmode=disable", connStr)
+	})
+
+	t.Run("ExtraOptions appended", func(t *testing.T) {
+		cfg := base
+		cfg.ExtraOptions = "options='-c search_path=myschema'"
+		connStr, err := cfg.ConnectionString()
+		require.Nil(t, err)
+		require.Equal(t, "host=127.0.0.1 port=5432 user=test password=test dbname=garm sslmode=disable options='-c search_path=myschema'", connStr)
+	})
+}
+
 func TestPostgreSQLConnectionStringSpecialChars(t *testing.T) {
 	base := PostgreSQL{
 		Username: "test",

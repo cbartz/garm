@@ -229,10 +229,13 @@ func GetTestPostgresDBConfig(t *testing.T) config.Database {
 	t.Cleanup(func() {
 		conn, err := dbsql.Open("pgx", baseDSN)
 		if err != nil {
+			t.Logf("WARNING: failed to open connection for schema cleanup %s: %v", schemaName, err)
 			return
 		}
 		defer conn.Close()
-		conn.Exec("DROP SCHEMA " + schemaName + " CASCADE") //nolint:errcheck
+		if _, err := conn.Exec("DROP SCHEMA " + schemaName + " CASCADE"); err != nil {
+			t.Logf("WARNING: failed to drop test schema %s: %v (schema may need manual cleanup)", schemaName, err)
+		}
 	})
 
 	u, err := url.Parse(baseDSN)
