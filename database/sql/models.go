@@ -461,7 +461,7 @@ type WorkflowJob struct {
 }
 
 type GithubEndpoint struct {
-	Name      string `gorm:"type:varchar(64);primary_key;"`
+	Name      string `gorm:"type:varchar(64);primary_key;uniqueIndex:idx_endpoint_name_nocase,expression:LOWER(name)"`
 	CreatedAt time.Time
 	UpdatedAt time.Time
 	DeletedAt gorm.DeletedAt `gorm:"index"`
