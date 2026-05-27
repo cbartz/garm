@@ -29,7 +29,6 @@ import (
 	"gorm.io/gorm/logger"
 
 	"github.com/cloudbase/garm/auth"
-	"github.com/cloudbase/garm/config"
 	dbCommon "github.com/cloudbase/garm/database/common"
 	"github.com/cloudbase/garm/database/watcher"
 	garmTesting "github.com/cloudbase/garm/internal/testing"
@@ -51,7 +50,7 @@ type EnterpriseTestSuite struct {
 	Store          dbCommon.Store
 	StoreSQLMocked *sqlDatabase
 	Fixtures       *EnterpriseTestFixtures
-	dbCfgFn        func(*testing.T) config.Database
+
 
 	adminCtx    context.Context
 	adminUserID string
@@ -89,7 +88,7 @@ func (s *EnterpriseTestSuite) SetupTest() {
 	ctx := context.Background()
 	watcher.InitWatcher(ctx)
 	// create testing database
-	db, err := NewSQLDatabase(ctx, testDBConfig(s.dbCfgFn, s.T()))
+	db, err := NewSQLDatabase(ctx, testDBConfig(s.T()))
 	if err != nil {
 		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
 	}
@@ -918,9 +917,4 @@ func (s *EnterpriseTestSuite) TestAddRepoEntityEvent() {
 
 func TestEnterpriseTestSuite(t *testing.T) {
 	suite.Run(t, new(EnterpriseTestSuite))
-	if cfg, ok := pgTestDBConfig(t); ok {
-		t.Run("postgresql", func(t *testing.T) {
-			suite.Run(t, &EnterpriseTestSuite{dbCfgFn: func(*testing.T) config.Database { return cfg }})
-		})
-	}
 }

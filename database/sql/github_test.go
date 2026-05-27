@@ -24,7 +24,6 @@ import (
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
 	"github.com/cloudbase/garm/auth"
-	"github.com/cloudbase/garm/config"
 	"github.com/cloudbase/garm/database/common"
 	"github.com/cloudbase/garm/database/watcher"
 	garmTesting "github.com/cloudbase/garm/internal/testing"
@@ -47,7 +46,7 @@ type GithubTestSuite struct {
 	suite.Suite
 
 	db      common.Store
-	dbCfgFn func(*testing.T) config.Database
+
 }
 
 func (s *GithubTestSuite) TearDownTest() {
@@ -57,7 +56,7 @@ func (s *GithubTestSuite) TearDownTest() {
 func (s *GithubTestSuite) SetupTest() {
 	ctx := context.Background()
 	watcher.InitWatcher(ctx)
-	db, err := NewSQLDatabase(ctx, testDBConfig(s.dbCfgFn, s.T()))
+	db, err := NewSQLDatabase(ctx, testDBConfig(s.T()))
 	if err != nil {
 		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
 	}
@@ -907,9 +906,4 @@ func (s *GithubTestSuite) TestDeleteGithubEndpointFailsWithOrgsReposOrCredential
 
 func TestGithubTestSuite(t *testing.T) {
 	suite.Run(t, new(GithubTestSuite))
-	if cfg, ok := pgTestDBConfig(t); ok {
-		t.Run("postgresql", func(t *testing.T) {
-			suite.Run(t, &GithubTestSuite{dbCfgFn: func(*testing.T) config.Database { return cfg }})
-		})
-	}
 }

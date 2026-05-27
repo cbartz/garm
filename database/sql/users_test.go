@@ -27,7 +27,6 @@ import (
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
 
-	"github.com/cloudbase/garm/config"
 	dbCommon "github.com/cloudbase/garm/database/common"
 	"github.com/cloudbase/garm/database/watcher"
 	garmTesting "github.com/cloudbase/garm/internal/testing"
@@ -46,7 +45,7 @@ type UserTestSuite struct {
 	Store          dbCommon.Store
 	StoreSQLMocked *sqlDatabase
 	Fixtures       *UserTestFixtures
-	dbCfgFn        func(*testing.T) config.Database
+
 }
 
 func (s *UserTestSuite) assertSQLMockExpectations() {
@@ -64,7 +63,7 @@ func (s *UserTestSuite) SetupTest() {
 	ctx := context.Background()
 	watcher.InitWatcher(ctx)
 	// create testing sqlite database
-	db, err := NewSQLDatabase(context.Background(), testDBConfig(s.dbCfgFn, s.T()))
+	db, err := NewSQLDatabase(context.Background(), testDBConfig(s.T()))
 	if err != nil {
 		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
 	}
@@ -285,9 +284,4 @@ func (s *UserTestSuite) TestUpdateUserDBSaveErr() {
 
 func TestUserTestSuite(t *testing.T) {
 	suite.Run(t, new(UserTestSuite))
-	if cfg, ok := pgTestDBConfig(t); ok {
-		t.Run("postgresql", func(t *testing.T) {
-			suite.Run(t, &UserTestSuite{dbCfgFn: func(*testing.T) config.Database { return cfg }})
-		})
-	}
 }

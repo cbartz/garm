@@ -22,21 +22,19 @@ import (
 	"github.com/stretchr/testify/suite"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
-	"github.com/cloudbase/garm/config"
 	dbCommon "github.com/cloudbase/garm/database/common"
 	"github.com/cloudbase/garm/database/watcher"
 )
 
 type CtrlTestSuite struct {
 	suite.Suite
-	Store     dbCommon.Store
-	dbCfgFn   func(*testing.T) config.Database
+	Store dbCommon.Store
 }
 
 func (s *CtrlTestSuite) SetupTest() {
 	ctx := context.Background()
 	watcher.InitWatcher(ctx)
-	db, err := NewSQLDatabase(ctx, testDBConfig(s.dbCfgFn, s.T()))
+	db, err := NewSQLDatabase(ctx, testDBConfig(s.T()))
 	if err != nil {
 		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
 	}
@@ -78,9 +76,4 @@ func (s *CtrlTestSuite) TestInitControllerAlreadyInitialized() {
 
 func TestCtrlTestSuite(t *testing.T) {
 	suite.Run(t, new(CtrlTestSuite))
-	if cfg, ok := pgTestDBConfig(t); ok {
-		t.Run("postgresql", func(t *testing.T) {
-			suite.Run(t, &CtrlTestSuite{dbCfgFn: func(*testing.T) config.Database { return cfg }})
-		})
-	}
 }

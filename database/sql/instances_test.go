@@ -30,7 +30,6 @@ import (
 	"gorm.io/gorm/logger"
 
 	commonParams "github.com/cloudbase/garm-provider-common/params"
-	"github.com/cloudbase/garm/config"
 	dbCommon "github.com/cloudbase/garm/database/common"
 	"github.com/cloudbase/garm/database/watcher"
 	garmTesting "github.com/cloudbase/garm/internal/testing"
@@ -52,7 +51,7 @@ type InstancesTestSuite struct {
 	StoreSQLMocked *sqlDatabase
 	Fixtures       *InstancesTestFixtures
 	adminCtx       context.Context
-	dbCfgFn        func(*testing.T) config.Database
+
 }
 
 func (s *InstancesTestSuite) equalInstancesByName(expected, actual []params.Instance) {
@@ -81,7 +80,7 @@ func (s *InstancesTestSuite) SetupTest() {
 	ctx := context.Background()
 	watcher.InitWatcher(ctx)
 	// create testing sqlite database
-	db, err := NewSQLDatabase(ctx, testDBConfig(s.dbCfgFn, s.T()))
+	db, err := NewSQLDatabase(ctx, testDBConfig(s.T()))
 	if err != nil {
 		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
 	}
@@ -738,9 +737,4 @@ func (s *InstancesTestSuite) TestPoolInstanceCountDBCountErr() {
 
 func TestInstTestSuite(t *testing.T) {
 	suite.Run(t, new(InstancesTestSuite))
-	if cfg, ok := pgTestDBConfig(t); ok {
-		t.Run("postgresql", func(t *testing.T) {
-			suite.Run(t, &InstancesTestSuite{dbCfgFn: func(*testing.T) config.Database { return cfg }})
-		})
-	}
 }

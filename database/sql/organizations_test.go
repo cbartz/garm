@@ -29,7 +29,6 @@ import (
 	"gorm.io/gorm/logger"
 
 	"github.com/cloudbase/garm/auth"
-	"github.com/cloudbase/garm/config"
 	dbCommon "github.com/cloudbase/garm/database/common"
 	"github.com/cloudbase/garm/database/watcher"
 	garmTesting "github.com/cloudbase/garm/internal/testing"
@@ -51,7 +50,7 @@ type OrgTestSuite struct {
 	Store          dbCommon.Store
 	StoreSQLMocked *sqlDatabase
 	Fixtures       *OrgTestFixtures
-	dbCfgFn        func(*testing.T) config.Database
+
 
 	adminCtx    context.Context
 	adminUserID string
@@ -89,7 +88,7 @@ func (s *OrgTestSuite) SetupTest() {
 	ctx := context.Background()
 	watcher.InitWatcher(ctx)
 	// create testing database
-	dbConfig := testDBConfig(s.dbCfgFn, s.T())
+	dbConfig := testDBConfig(s.T())
 	db, err := NewSQLDatabase(ctx, dbConfig)
 	if err != nil {
 		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
@@ -986,9 +985,4 @@ func (s *OrgTestSuite) TestUpdateOrganizationPoolInvalidOrgID() {
 
 func TestOrgTestSuite(t *testing.T) {
 	suite.Run(t, new(OrgTestSuite))
-	if cfg, ok := pgTestDBConfig(t); ok {
-		t.Run("postgresql", func(t *testing.T) {
-			suite.Run(t, &OrgTestSuite{dbCfgFn: func(*testing.T) config.Database { return cfg }})
-		})
-	}
 }

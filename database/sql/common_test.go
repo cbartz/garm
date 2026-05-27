@@ -29,23 +29,11 @@ const (
 )
 
 // testDBConfig returns the database config for a suite test case.
-// When dbCfgFn is set (non-nil), it returns that backend's config.
-// Otherwise it creates a fresh SQLite database per test case, preserving
-// the original per-test isolation for the default SQLite backend.
-func testDBConfig(dbCfgFn func(*testing.T) config.Database, t *testing.T) config.Database {
-	if dbCfgFn != nil {
-		return dbCfgFn(t)
+// Returns a PostgreSQL config when GARM_TEST_POSTGRES_DSN is set,
+// otherwise a fresh per-test SQLite database.
+func testDBConfig(t *testing.T) config.Database {
+	if os.Getenv("GARM_TEST_POSTGRES_DSN") != "" {
+		return garmTesting.GetTestPostgresDBConfig(t)
 	}
 	return garmTesting.GetTestSqliteDBConfig(t)
-}
-
-// pgTestDBConfig returns a PostgreSQL database config read from GARM_TEST_POSTGRES_DSN.
-// Returns false if the environment variable is not set, so callers can skip the
-// PostgreSQL run without calling t.Skip() from an outer test function.
-func pgTestDBConfig(t *testing.T) (config.Database, bool) {
-	t.Helper()
-	if os.Getenv("GARM_TEST_POSTGRES_DSN") == "" {
-		return config.Database{}, false
-	}
-	return garmTesting.GetTestPostgresDBConfig(t), true
 }
