@@ -235,8 +235,8 @@ type Repository struct {
 	PoolManagerRunning       bool
 	PoolManagerFailureReason string
 
-	Owner            string `gorm:"index:idx_owner_nocase,unique"`
-	Name             string `gorm:"index:idx_owner_nocase,unique"`
+	Owner            string `gorm:"index:idx_owner_nocase,unique,expression:LOWER(owner)"`
+	Name             string `gorm:"index:idx_owner_nocase,unique,expression:LOWER(name)"`
 	WebhookSecret    []byte
 	Pools            []Pool                  `gorm:"foreignKey:RepoID"`
 	ScaleSets        []ScaleSet              `gorm:"foreignKey:RepoID"`
@@ -244,7 +244,7 @@ type Repository struct {
 	PoolBalancerType params.PoolBalancerType `gorm:"type:varchar(64)"`
 	AgentMode        bool                    `gorm:"index:repo_agent_idx"`
 
-	EndpointName *string        `gorm:"index:idx_owner_nocase,unique"`
+	EndpointName *string        `gorm:"index:idx_owner_nocase,unique,expression:LOWER(endpoint_name)"`
 	Endpoint     GithubEndpoint `gorm:"foreignKey:EndpointName;constraint:OnDelete:SET NULL"`
 
 	Events []RepositoryEvent `gorm:"foreignKey:RepoID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE;"`
@@ -272,7 +272,7 @@ type Organization struct {
 	PoolManagerRunning       bool
 	PoolManagerFailureReason string
 
-	Name             string `gorm:"index:idx_org_name_nocase"`
+	Name             string `gorm:"index:idx_org_name_nocase,expression:LOWER(name)"`
 	WebhookSecret    []byte
 	Pools            []Pool                  `gorm:"foreignKey:OrgID"`
 	ScaleSet         []ScaleSet              `gorm:"foreignKey:OrgID"`
@@ -280,7 +280,7 @@ type Organization struct {
 	PoolBalancerType params.PoolBalancerType `gorm:"type:varchar(64)"`
 	AgentMode        bool                    `gorm:"index:org_agent_idx"`
 
-	EndpointName *string        `gorm:"index:idx_org_name_nocase"`
+	EndpointName *string        `gorm:"index:idx_org_name_nocase,expression:LOWER(endpoint_name)"`
 	Endpoint     GithubEndpoint `gorm:"foreignKey:EndpointName;constraint:OnDelete:SET NULL"`
 
 	Events []OrganizationEvent `gorm:"foreignKey:OrgID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE;"`
@@ -306,7 +306,7 @@ type Enterprise struct {
 	PoolManagerRunning       bool
 	PoolManagerFailureReason string
 
-	Name             string `gorm:"index:idx_ent_name_nocase"`
+	Name             string `gorm:"index:idx_ent_name_nocase,expression:LOWER(name)"`
 	WebhookSecret    []byte
 	Pools            []Pool                  `gorm:"foreignKey:EnterpriseID"`
 	ScaleSet         []ScaleSet              `gorm:"foreignKey:EnterpriseID"`
@@ -314,7 +314,7 @@ type Enterprise struct {
 	PoolBalancerType params.PoolBalancerType `gorm:"type:varchar(64)"`
 	AgentMode        bool                    `gorm:"index:enterprise_agent_idx"`
 
-	EndpointName *string        `gorm:"index:idx_ent_name_nocase"`
+	EndpointName *string        `gorm:"index:idx_ent_name_nocase,expression:LOWER(endpoint_name)"`
 	Endpoint     GithubEndpoint `gorm:"foreignKey:EndpointName;constraint:OnDelete:SET NULL"`
 
 	Events []EnterpriseEvent `gorm:"foreignKey:EnterpriseID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE;"`
@@ -480,7 +480,7 @@ type GithubEndpoint struct {
 type GithubCredentials struct {
 	gorm.Model
 
-	Name   string     `gorm:"index:idx_github_credentials,unique;type:varchar(64)"`
+	Name   string     `gorm:"index:idx_github_credentials,unique,expression:LOWER(name);type:varchar(64)"`
 	UserID *uuid.UUID `gorm:"index:idx_github_credentials,unique"`
 	User   User       `gorm:"foreignKey:UserID"`
 
@@ -507,7 +507,7 @@ func (g GithubCredentials) GetID() uint {
 type GiteaCredentials struct {
 	gorm.Model
 
-	Name   string     `gorm:"index:idx_gitea_credentials,unique;type:varchar(64)"`
+	Name   string     `gorm:"index:idx_gitea_credentials,unique,expression:LOWER(name);type:varchar(64)"`
 	UserID *uuid.UUID `gorm:"index:idx_gitea_credentials,unique"`
 	User   User       `gorm:"foreignKey:UserID"`
 
