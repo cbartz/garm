@@ -24,6 +24,7 @@ import (
 
 	"github.com/go-gormigrate/gormigrate/v2"
 	"gorm.io/driver/mysql"
+	"gorm.io/driver/postgres"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -65,6 +66,8 @@ func newDBConn(dbCfg config.Database) (conn *gorm.DB, err error) {
 		conn, err = gorm.Open(mysql.Open(connURI), gormConfig)
 	case config.SQLiteBackend:
 		conn, err = gorm.Open(sqlite.Open(connURI), gormConfig)
+	case config.PostgreSQLBackend:
+		conn, err = gorm.Open(postgres.Open(connURI), gormConfig)
 	}
 	if err != nil {
 		return nil, fmt.Errorf("error connecting to database: %w", err)
@@ -106,9 +109,9 @@ func NewSQLDatabase(ctx context.Context, cfg config.Database) (common.Store, err
 		producer: producer,
 	}
 
-	// Create separate connection for objects database (only for SQLite)
-	if cfg.DbBackend == config.SQLiteBackend {
-		// Get config for objects database
+	switch cfg.DbBackend {
+	case config.SQLiteBackend:
+		// SQLite uses a separate file for blobs to avoid WAL contention during large writes.
 		objectsCfg, err := cfg.SQLiteBlobDatabaseConfig()
 		if err != nil {
 			return nil, fmt.Errorf("failed to get blob DB config: %w", err)
@@ -126,6 +129,9 @@ func NewSQLDatabase(ctx context.Context, cfg config.Database) (common.Store, err
 		objectsSQLDB.SetMaxOpenConns(1)
 		db.objectsConn = objectsConn
 		db.objectsSQLDB = objectsSQLDB
+	case config.PostgreSQLBackend:
+		// PostgreSQL reuses the main connection — no separate DB needed for blobs.
+		db.objectsConn = conn
 	}
 
 	if err := db.migrateDB(); err != nil {
@@ -209,12 +215,22 @@ func (s *sqlDatabase) ensureGithubEndpoint() error {
 	return nil
 }
 
+var fileObjectMigrationOptions = &gormigrate.Options{
+	TableName:                 "file_object_migrations",
+	IDColumnName:              gormigrate.DefaultOptions.IDColumnName,
+	IDColumnSize:              gormigrate.DefaultOptions.IDColumnSize,
+	UseTransaction:            gormigrate.DefaultOptions.UseTransaction,
+	ValidateUnknownMigrations: gormigrate.DefaultOptions.ValidateUnknownMigrations,
+}
+
 func (s *sqlDatabase) migrateFileObjects() error {
 	if s.objectsConn == nil {
 		return nil
 	}
-
-	m := gormigrate.New(s.objectsConn, gormigrate.DefaultOptions, migrations.AllFileObjects())
+	// Use a distinct migrations table so the file-object migration history
+	// does not collide with the main migrations table when both run on the
+	// same database connection (e.g. PostgreSQL).
+	m := gormigrate.New(s.objectsConn, fileObjectMigrationOptions, migrations.AllFileObjects())
 	m.InitSchema(func(tx *gorm.DB) error {
 		return tx.AutoMigrate(&FileObject{}, &FileBlob{}, &FileObjectTag{})
 	})

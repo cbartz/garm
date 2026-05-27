@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
@@ -45,6 +46,10 @@ func (s *sqlDatabase) getUserByUsernameOrEmail(tx *gorm.DB, user string) (User, 
 }
 
 func (s *sqlDatabase) getUserByID(tx *gorm.DB, userID string) (User, error) {
+	// Validate UUID format before querying; an invalid UUID can never match a row.
+	if _, err := uuid.Parse(userID); err != nil {
+		return User{}, runnerErrors.ErrNotFound
+	}
 	var dbUser User
 	q := tx.Model(&User{}).Where("id = ?", userID).First(&dbUser)
 	if q.Error != nil {

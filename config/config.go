@@ -659,12 +659,17 @@ func (m *MySQL) ConnectionString() (string, error) {
 
 // PostgreSQL is the config entry for the postgresql section
 type PostgreSQL struct {
-	Username string `toml:"username" json:"username"`
-	Password string `toml:"password" json:"password"`
-	Hostname string `toml:"hostname" json:"hostname"`
-	Port     int    `toml:"port"     json:"port"`
-	Database string `toml:"database" json:"database"`
-	SSLMode  string `toml:"sslmode"  json:"sslmode"`
+	Username     string `toml:"username"      json:"username"`
+	Password     string `toml:"password"      json:"password"`
+	Hostname     string `toml:"hostname"      json:"hostname"`
+	Port         int    `toml:"port"          json:"port"`
+	Database     string `toml:"database"      json:"database"`
+	SSLMode      string `toml:"sslmode"       json:"sslmode"`
+	// ExtraOptions is appended verbatim to the libpq connection string.
+	// Use standard key=value pairs (e.g. "options='-c search_path=myschema'").
+	// Keys already present in the DSN (host, port, user, password, dbname, sslmode)
+	// should not be repeated here.
+	ExtraOptions string `toml:"extra_options" json:"extra_options"`
 }
 
 // Validate validates a PostgreSQL config entry and applies defaults for optional fields.
@@ -703,10 +708,14 @@ func (p *PostgreSQL) ConnectionString() (string, error) {
 	if err := p.Validate(); err != nil {
 		return "", err
 	}
-	return fmt.Sprintf(
+	dsn := fmt.Sprintf(
 		"host=%s port=%d user=%s password=%s dbname=%s sslmode=%s",
 		pgQuoteValue(p.Hostname), p.Port, pgQuoteValue(p.Username), pgQuoteValue(p.Password), pgQuoteValue(p.Database), pgQuoteValue(p.SSLMode),
-	), nil
+	)
+	if p.ExtraOptions != "" {
+		dsn += " " + p.ExtraOptions
+	}
+	return dsn, nil
 }
 
 // pgQuoteValue quotes a connection string value if it contains characters that
