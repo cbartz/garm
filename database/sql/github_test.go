@@ -45,8 +45,7 @@ const (
 type GithubTestSuite struct {
 	suite.Suite
 
-	db      common.Store
-
+	db common.Store
 }
 
 func (s *GithubTestSuite) TearDownTest() {

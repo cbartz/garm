@@ -51,7 +51,6 @@ type EnterpriseTestSuite struct {
 	StoreSQLMocked *sqlDatabase
 	Fixtures       *EnterpriseTestFixtures
 
-
 	adminCtx    context.Context
 	adminUserID string
 

@@ -478,11 +478,11 @@ func (p *Provider) Validate() error {
 
 // Database is the database config entry
 type Database struct {
-	Debug     bool          `toml:"debug" json:"debug"`
-	DbBackend DBBackendType `toml:"backend" json:"backend"`
-	MySQL     MySQL         `toml:"mysql" json:"mysql"`
-	SQLite    SQLite        `toml:"sqlite3" json:"sqlite3"`
-	PostgreSQL PostgreSQL   `toml:"postgresql" json:"postgresql"`
+	Debug      bool          `toml:"debug" json:"debug"`
+	DbBackend  DBBackendType `toml:"backend" json:"backend"`
+	MySQL      MySQL         `toml:"mysql" json:"mysql"`
+	SQLite     SQLite        `toml:"sqlite3" json:"sqlite3"`
+	PostgreSQL PostgreSQL    `toml:"postgresql" json:"postgresql"`
 	// Passphrase is used to encrypt any sensitive info before
 	// inserting it into the database. This is just temporary until
 	// we move to something like vault or barbican for secrets storage.
@@ -659,12 +659,12 @@ func (m *MySQL) ConnectionString() (string, error) {
 
 // PostgreSQL is the config entry for the postgresql section
 type PostgreSQL struct {
-	Username     string `toml:"username"      json:"username"`
-	Password     string `toml:"password"      json:"password"`
-	Hostname     string `toml:"hostname"      json:"hostname"`
-	Port         int    `toml:"port"          json:"port"`
-	Database     string `toml:"database"      json:"database"`
-	SSLMode      string `toml:"sslmode"       json:"sslmode"`
+	Username string `toml:"username"      json:"username"`
+	Password string `toml:"password"      json:"password"`
+	Hostname string `toml:"hostname"      json:"hostname"`
+	Port     int    `toml:"port"          json:"port"`
+	Database string `toml:"database"      json:"database"`
+	SSLMode  string `toml:"sslmode"       json:"sslmode"`
 	// ExtraOptions is appended verbatim to the libpq connection string.
 	// Use standard key=value pairs (e.g. "options='-c search_path=myschema'").
 	// Keys already present in the DSN (host, port, user, password, dbname, sslmode)

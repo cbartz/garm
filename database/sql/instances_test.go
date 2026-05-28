@@ -51,7 +51,6 @@ type InstancesTestSuite struct {
 	StoreSQLMocked *sqlDatabase
 	Fixtures       *InstancesTestFixtures
 	adminCtx       context.Context
-
 }
 
 func (s *InstancesTestSuite) equalInstancesByName(expected, actual []params.Instance) {

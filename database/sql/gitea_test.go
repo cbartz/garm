@@ -35,7 +35,6 @@ type GiteaTestSuite struct {
 
 	giteaEndpoint params.ForgeEndpoint
 	db            common.Store
-
 }
 
 func (s *GiteaTestSuite) SetupTest() {

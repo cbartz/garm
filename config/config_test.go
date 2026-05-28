@@ -386,7 +386,7 @@ func TestDatabaseConfig(t *testing.T) {
 			name: "postgresql backend is misconfigured",
 			cfg: Database{
 				DbBackend:  PostgreSQLBackend,
-				PostgreSQL:   PostgreSQL{},
+				PostgreSQL: PostgreSQL{},
 				Passphrase: cfg.Passphrase,
 			},
 			errString: "validating postgresql config: username is required",
@@ -395,7 +395,7 @@ func TestDatabaseConfig(t *testing.T) {
 			name: "postgresql backend is configured and valid",
 			cfg: Database{
 				DbBackend:  PostgreSQLBackend,
-				PostgreSQL:   getPostgresDefaultConfig(),
+				PostgreSQL: getPostgresDefaultConfig(),
 				Passphrase: cfg.Passphrase,
 			},
 			errString: "",

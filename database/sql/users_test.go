@@ -45,7 +45,6 @@ type UserTestSuite struct {
 	Store          dbCommon.Store
 	StoreSQLMocked *sqlDatabase
 	Fixtures       *UserTestFixtures
-
 }
 
 func (s *UserTestSuite) assertSQLMockExpectations() {
