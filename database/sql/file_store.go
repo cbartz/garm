@@ -29,6 +29,17 @@ func (s *sqlDatabase) isPostgres() bool {
 	return s.cfg.DbBackend == config.PostgreSQLBackend
 }
 
+// rawObjectsDB returns the *sql.DB for the objects store.
+// For SQLite it is the dedicated blob database file; for PostgreSQL it is
+// derived from objectsConn (which is the same pool as the main connection).
+func (s *sqlDatabase) rawObjectsDB() *sql.DB {
+	if s.objectsSQLDB != nil {
+		return s.objectsSQLDB
+	}
+	db, _ := s.objectsConn.DB()
+	return db
+}
+
 // streamBlobContent opens a raw SQLite blob handle, streams initialData followed
 // by the rest of r into it, and returns the hex-encoded SHA256 of the written content.
 // The raw *sql.Conn is closed before returning so the caller can safely use
@@ -187,7 +198,7 @@ func (s *sqlDatabase) createFileObjectPostgres(ctx context.Context, param params
 	// rest of the content follows in tmpFile (positioned right after those bytes).
 	fullReader := io.MultiReader(bytes.NewReader(bufHead), tmpFile)
 
-	oid, sha256sum, err := s.streamToLargeObject(ctx, s.objectsSQLDB, fullReader)
+	oid, sha256sum, err := s.streamToLargeObject(ctx, s.rawObjectsDB(), fullReader)
 	if err != nil {
 		return params.FileObject{}, fmt.Errorf("failed to stream to large object: %w", err)
 	}
@@ -566,7 +577,7 @@ func (s *sqlDatabase) OpenFileObjectContent(ctx context.Context, objID uint) (io
 // io.ReadCloser. The underlying connection and transaction remain open until
 // Close() is called.
 func (s *sqlDatabase) openLargeObject(ctx context.Context, looid uint32) (io.ReadCloser, error) {
-	conn, err := s.objectsSQLDB.Conn(ctx)
+	conn, err := s.rawObjectsDB().Conn(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get connection: %w", err)
 	}
