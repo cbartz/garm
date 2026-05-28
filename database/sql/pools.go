@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
 	"github.com/cloudbase/garm/database/common"
@@ -416,7 +417,7 @@ func (s *sqlDatabase) UpdateEntityPool(ctx context.Context, entity params.ForgeE
 		}
 	}()
 	err = s.conn.Transaction(func(tx *gorm.DB) error {
-		pool, err := s.getEntityPool(tx, entity.EntityType, entity.ID, poolID, "Tags", "Instances")
+		pool, err := s.getEntityPool(tx.Clauses(clause.Locking{Strength: "UPDATE"}), entity.EntityType, entity.ID, poolID, "Tags", "Instances")
 		if err != nil {
 			return fmt.Errorf("error fetching pool: %w", err)
 		}

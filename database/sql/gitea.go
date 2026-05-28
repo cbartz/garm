@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
 	"github.com/cloudbase/garm/auth"
@@ -97,7 +98,7 @@ func (s *sqlDatabase) UpdateGiteaEndpoint(_ context.Context, name string, param 
 	}()
 	var endpoint GithubEndpoint
 	err = s.conn.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("LOWER(name) = LOWER(?) and endpoint_type = ?", name, params.GiteaEndpointType).First(&endpoint).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("LOWER(name) = LOWER(?) and endpoint_type = ?", name, params.GiteaEndpointType).First(&endpoint).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return runnerErrors.NewNotFoundError("gitea endpoint %q not found", name)
 			}
@@ -185,7 +186,7 @@ func (s *sqlDatabase) DeleteGiteaEndpoint(_ context.Context, name string) (err e
 	}()
 	err = s.conn.Transaction(func(tx *gorm.DB) error {
 		var endpoint GithubEndpoint
-		if err := tx.Where("LOWER(name) = LOWER(?) and endpoint_type = ?", name, params.GiteaEndpointType).First(&endpoint).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("LOWER(name) = LOWER(?) and endpoint_type = ?", name, params.GiteaEndpointType).First(&endpoint).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return nil
 			}
@@ -245,7 +246,7 @@ func (s *sqlDatabase) CreateGiteaCredentials(ctx context.Context, param params.C
 	var creds GiteaCredentials
 	err = s.conn.Transaction(func(tx *gorm.DB) error {
 		var endpoint GithubEndpoint
-		if err := tx.Where("LOWER(name) = LOWER(?) and endpoint_type = ?", param.Endpoint, params.GiteaEndpointType).First(&endpoint).Error; err != nil {
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("LOWER(name) = LOWER(?) and endpoint_type = ?", param.Endpoint, params.GiteaEndpointType).First(&endpoint).Error; err != nil {
 			if errors.Is(err, gorm.ErrRecordNotFound) {
 				return runnerErrors.NewNotFoundError("gitea endpoint %q not found", param.Endpoint)
 			}
@@ -478,7 +479,7 @@ func (s *sqlDatabase) DeleteGiteaCredentials(ctx context.Context, id uint) (err 
 		}
 	}()
 	err = s.conn.Transaction(func(tx *gorm.DB) error {
-		q := tx.Where("id = ?", id).
+		q := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", id).
 			Preload("Repositories").
 			Preload("Organizations")
 		if !auth.IsAdmin(ctx) {
