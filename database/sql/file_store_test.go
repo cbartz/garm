@@ -42,7 +42,6 @@ type FileStoreTestSuite struct {
 	ctx      context.Context
 	adminCtx context.Context
 	Fixtures *FileStoreTestFixtures
-
 }
 
 func (s *FileStoreTestSuite) TearDownTest() {

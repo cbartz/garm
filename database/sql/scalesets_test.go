@@ -35,7 +35,6 @@ type ScaleSetsTestSuite struct {
 	adminCtx context.Context
 	creds    params.ForgeCredentials
 
-
 	org        params.Organization
 	repo       params.Repository
 	enterprise params.Enterprise

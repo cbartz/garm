@@ -49,7 +49,6 @@ type PoolsTestSuite struct {
 	StoreSQLMocked *sqlDatabase
 	Fixtures       *PoolsTestFixtures
 	adminCtx       context.Context
-
 }
 
 func (s *PoolsTestSuite) assertSQLMockExpectations() {

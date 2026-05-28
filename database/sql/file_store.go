@@ -775,4 +775,3 @@ func (s *sqlDatabase) sqlFileObjectToCommonParams(obj FileObject) params.FileObj
 		Tags:        tags,
 	}
 }
-

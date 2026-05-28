@@ -51,7 +51,6 @@ type OrgTestSuite struct {
 	StoreSQLMocked *sqlDatabase
 	Fixtures       *OrgTestFixtures
 
-
 	adminCtx    context.Context
 	adminUserID string
 

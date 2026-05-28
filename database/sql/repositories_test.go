@@ -55,7 +55,6 @@ type RepoTestSuite struct {
 	StoreSQLMocked *sqlDatabase
 	Fixtures       *RepoTestFixtures
 
-
 	adminCtx    context.Context
 	adminUserID string
 

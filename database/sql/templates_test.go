@@ -47,7 +47,6 @@ type TemplatesTestSuite struct {
 	ctx      context.Context
 	adminCtx context.Context
 
-
 	StoreSQLMocked *sqlDatabase
 	Fixtures       *TemplatesTestFixtures
 }
