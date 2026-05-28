@@ -15,10 +15,12 @@
 package sql
 
 import (
+	"context"
 	"os"
 	"testing"
 
 	"github.com/cloudbase/garm/config"
+	"github.com/cloudbase/garm/database/common"
 	garmTesting "github.com/cloudbase/garm/internal/testing"
 )
 
@@ -36,4 +38,18 @@ func testDBConfig(t *testing.T) config.Database {
 		return garmTesting.GetTestPostgresDBConfig(t)
 	}
 	return garmTesting.GetTestSqliteDBConfig(t)
+}
+
+// newTestDB creates a database for a test case and registers t.Cleanup to
+// close the underlying connection pool. Without explicit close, each SetupTest
+// leaks a pool of open connections that only drain after ConnMaxIdleTimeSecs —
+// fast backends (e.g. tmpfs PostgreSQL) exhaust max_connections before that.
+func newTestDB(t *testing.T) common.Store {
+	t.Helper()
+	db, err := NewSQLDatabase(context.Background(), testDBConfig(t))
+	if err != nil {
+		t.Fatalf("failed to create db connection: %s", err)
+	}
+	t.Cleanup(func() { db.(*sqlDatabase).sqlDB.Close() })
+	return db
 }
