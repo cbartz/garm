@@ -50,6 +50,13 @@ func newTestDB(t *testing.T) common.Store {
 	if err != nil {
 		t.Fatalf("failed to create db connection: %s", err)
 	}
-	t.Cleanup(func() { db.(*sqlDatabase).sqlDB.Close() })
+	t.Cleanup(func() {
+		sqlDB := db.(*sqlDatabase)
+		// SQLite opens a separate objectsSQLDB for blobs; PostgreSQL leaves it nil.
+		if sqlDB.objectsSQLDB != nil {
+			sqlDB.objectsSQLDB.Close()
+		}
+		sqlDB.sqlDB.Close()
+	})
 	return db
 }
