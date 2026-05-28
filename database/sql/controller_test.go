@@ -34,11 +34,7 @@ type CtrlTestSuite struct {
 func (s *CtrlTestSuite) SetupTest() {
 	ctx := context.Background()
 	watcher.InitWatcher(ctx)
-	db, err := NewSQLDatabase(ctx, testDBConfig(s.T()))
-	if err != nil {
-		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
-	}
-	s.Store = db
+	s.Store = newTestDB(s.T())
 }
 
 func (s *CtrlTestSuite) TearDownTest() {
