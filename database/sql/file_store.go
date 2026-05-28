@@ -70,8 +70,10 @@ func (s *sqlDatabase) streamBlobContent(ctx context.Context, blobID uint, initia
 	return sha256sum, nil
 }
 
-// streamToLargeObject creates a PostgreSQL Large Object, writes r into the Large
-// Object while computing SHA256, commits the transaction, and returns the OID and checksum.
+// streamToLargeObject writes r into a new PostgreSQL Large Object (pg_largeobject)
+// while computing SHA256, and returns the assigned OID and checksum.
+// It does not create any application rows; the caller is responsible for storing
+// the returned OID in the FileBlob row.
 func (s *sqlDatabase) streamToLargeObject(ctx context.Context, sqlDB *sql.DB, r io.Reader) (uint32, string, error) {
 	conn, err := sqlDB.Conn(ctx)
 	if err != nil {
