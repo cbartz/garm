@@ -94,24 +94,24 @@ func (s *sqlDatabase) streamToLargeObject(ctx context.Context, sqlDB *sql.DB, r 
 		los := tx.LargeObjects()
 		oid, err = los.Create(ctx, 0)
 		if err != nil {
-			tx.Rollback(context.Background()) //nolint:errcheck
+			_ = tx.Rollback(context.Background())
 			return fmt.Errorf("failed to create large object: %w", err)
 		}
 
 		lo, err := los.Open(ctx, oid, pgx.LargeObjectModeWrite)
 		if err != nil {
-			tx.Rollback(context.Background()) //nolint:errcheck
+			_ = tx.Rollback(context.Background())
 			return fmt.Errorf("failed to open large object for writing: %w", err)
 		}
 
 		hasher := sha256.New()
 		if _, err := io.Copy(io.MultiWriter(lo, hasher), r); err != nil {
-			tx.Rollback(context.Background()) //nolint:errcheck
+			_ = tx.Rollback(context.Background())
 			return fmt.Errorf("failed to write to large object: %w", err)
 		}
 
 		if err := lo.Close(); err != nil {
-			tx.Rollback(context.Background()) //nolint:errcheck
+			_ = tx.Rollback(context.Background())
 			return fmt.Errorf("failed to close large object: %w", err)
 		}
 
@@ -217,7 +217,7 @@ func (s *sqlDatabase) createFileObjectPostgres(ctx context.Context, param params
 	})
 	if err != nil {
 		// Best-effort cleanup of the orphaned Large Object.
-		s.objectsConn.Exec("SELECT lo_unlink(?)", oid) //nolint:errcheck
+		_ = s.objectsConn.Exec("SELECT lo_unlink(?)", oid)
 		return params.FileObject{}, fmt.Errorf("failed to create database entry for blob: %w", err)
 	}
 
@@ -583,13 +583,13 @@ func (s *sqlDatabase) openLargeObject(ctx context.Context, looid uint32) (io.Rea
 		los := tx.LargeObjects()
 		lo, err = los.Open(ctx, looid, pgx.LargeObjectModeRead)
 		if err != nil {
-			tx.Rollback(context.Background()) //nolint:errcheck
+			_ = tx.Rollback(context.Background())
 			return fmt.Errorf("failed to open large object for reading: %w", err)
 		}
 		return nil
 	})
 	if err != nil {
-		conn.Close() //nolint:errcheck
+		_ = conn.Close()
 		return nil, err
 	}
 
@@ -623,7 +623,7 @@ func (s *sqlDatabase) openSQLiteBlob(ctx context.Context, blobID uint) (io.ReadC
 		return nil
 	})
 	if err != nil {
-		conn.Close() //nolint:errcheck
+		_ = conn.Close()
 		return nil, fmt.Errorf("failed to open blob for reading: %w", err)
 	}
 
@@ -652,7 +652,7 @@ func (r *loReadCloser) Close() error {
 	cleanupCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	r.lo.Close()                    //nolint:errcheck
+	_ = r.lo.Close()
 	txErr := r.tx.Commit(cleanupCtx)
 	connErr := r.sqlConn.Close()
 	if txErr != nil {
