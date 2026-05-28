@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
 	commonParams "github.com/cloudbase/garm-provider-common/params"
@@ -708,6 +709,26 @@ func (s *sqlDatabase) getPoolByID(tx *gorm.DB, poolID string, preload ...string)
 			return Pool{}, runnerErrors.ErrNotFound
 		}
 		return Pool{}, fmt.Errorf("error fetching org from database: %w", q.Error)
+	}
+	return pool, nil
+}
+
+// getPoolByIDForUpdate fetches the pool row and holds an exclusive row-level lock
+// (SELECT ... FOR UPDATE) for the duration of the surrounding transaction. Use this
+// instead of getPoolByID when the caller needs to read-then-write atomically, such as
+// checking MaxRunners before inserting an instance.
+func (s *sqlDatabase) getPoolByIDForUpdate(tx *gorm.DB, poolID string) (Pool, error) {
+	u, err := uuid.Parse(poolID)
+	if err != nil {
+		return Pool{}, fmt.Errorf("error parsing id: %w", runnerErrors.ErrBadRequest)
+	}
+	var pool Pool
+	q := tx.Clauses(clause.Locking{Strength: "UPDATE"}).Where("id = ?", u).First(&pool)
+	if q.Error != nil {
+		if errors.Is(q.Error, gorm.ErrRecordNotFound) {
+			return Pool{}, runnerErrors.ErrNotFound
+		}
+		return Pool{}, fmt.Errorf("error fetching pool from database: %w", q.Error)
 	}
 	return pool, nil
 }

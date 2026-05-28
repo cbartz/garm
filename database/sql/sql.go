@@ -101,6 +101,13 @@ func NewSQLDatabase(ctx context.Context, cfg config.Database) (common.Store, err
 		sqlDB.SetMaxOpenConns(1)
 	}
 
+	if cfg.DbBackend == config.PostgreSQLBackend {
+		sqlDB.SetMaxOpenConns(cfg.PostgreSQL.MaxOpenConns)
+		sqlDB.SetMaxIdleConns(cfg.PostgreSQL.MaxIdleConns)
+		sqlDB.SetConnMaxLifetime(time.Duration(cfg.PostgreSQL.ConnMaxLifetimeMins) * time.Minute)
+		sqlDB.SetConnMaxIdleTime(time.Duration(cfg.PostgreSQL.ConnMaxIdleTimeSecs) * time.Second)
+	}
+
 	db := &sqlDatabase{
 		conn:     conn,
 		sqlDB:    sqlDB,

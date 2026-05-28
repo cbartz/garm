@@ -22,6 +22,7 @@ import (
 
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
 	"github.com/cloudbase/garm-provider-common/util"
@@ -177,7 +178,7 @@ func (s *sqlDatabase) UpdateEnterprise(ctx context.Context, enterpriseID string,
 	var enterprise Enterprise
 	err = s.conn.Transaction(func(tx *gorm.DB) error {
 		var err error
-		enterprise, err = s.getEnterpriseByID(ctx, tx, enterpriseID, "Endpoint")
+		enterprise, err = s.getEnterpriseByID(ctx, tx.Clauses(clause.Locking{Strength: "UPDATE"}), enterpriseID, "Endpoint")
 		if err != nil {
 			return fmt.Errorf("error fetching enterprise: %w", err)
 		}

@@ -670,6 +670,20 @@ type PostgreSQL struct {
 	// Keys already present in the DSN (host, port, user, password, dbname, sslmode)
 	// should not be repeated here.
 	ExtraOptions string `toml:"extra_options" json:"extra_options"`
+
+	// Connection pool settings. Zero values use production-friendly defaults.
+	// MaxOpenConns is the maximum number of open connections to the database.
+	// Defaults to 25.
+	MaxOpenConns int `toml:"max_open_conns" json:"max_open_conns"`
+	// MaxIdleConns is the maximum number of idle connections in the pool.
+	// Defaults to 5.
+	MaxIdleConns int `toml:"max_idle_conns" json:"max_idle_conns"`
+	// ConnMaxLifetimeMins is the maximum lifetime of a connection in minutes.
+	// Defaults to 30.
+	ConnMaxLifetimeMins int `toml:"conn_max_lifetime_mins" json:"conn_max_lifetime_mins"`
+	// ConnMaxIdleTimeSecs is the maximum time a connection may be idle before
+	// being closed, in seconds. Defaults to 300 (5 minutes).
+	ConnMaxIdleTimeSecs int `toml:"conn_max_idle_time_secs" json:"conn_max_idle_time_secs"`
 }
 
 // Validate validates a PostgreSQL config entry and applies defaults for optional fields.
@@ -699,6 +713,18 @@ func (p *PostgreSQL) Validate() error {
 	case "disable", "allow", "prefer", "require", "verify-ca", "verify-full":
 	default:
 		return fmt.Errorf("invalid sslmode %q: must be one of disable, allow, prefer, require, verify-ca, verify-full", p.SSLMode)
+	}
+	if p.MaxOpenConns == 0 {
+		p.MaxOpenConns = 25
+	}
+	if p.MaxIdleConns == 0 {
+		p.MaxIdleConns = 5
+	}
+	if p.ConnMaxLifetimeMins == 0 {
+		p.ConnMaxLifetimeMins = 30
+	}
+	if p.ConnMaxIdleTimeSecs == 0 {
+		p.ConnMaxIdleTimeSecs = 300
 	}
 	return nil
 }
