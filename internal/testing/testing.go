@@ -273,6 +273,9 @@ func GetTestPostgresDBConfig(t *testing.T) config.Database {
 			Database:     dbName,
 			SSLMode:      sslMode,
 			ExtraOptions: "options='-c search_path=" + schemaName + "'",
+			// Short idle timeout so per-test pools release connections quickly,
+			// preventing exhaustion of max_connections across concurrent test schemas.
+			ConnMaxIdleTimeSecs: 30,
 		},
 	}
 }

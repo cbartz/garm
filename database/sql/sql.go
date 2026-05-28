@@ -101,16 +101,11 @@ func NewSQLDatabase(ctx context.Context, cfg config.Database) (common.Store, err
 		sqlDB.SetMaxOpenConns(1)
 	}
 
-	// Cap the PostgreSQL connection pool. The active idle-time cleaner in
-	// database/sql reaps connections from pools that go out of scope (e.g.
-	// per-test pools) within ConnMaxIdleTime, keeping total open connections
-	// well within the default max_connections=100 even when many pools are
-	// created in quick succession.
 	if cfg.DbBackend == config.PostgreSQLBackend {
-		sqlDB.SetMaxOpenConns(10)
-		sqlDB.SetMaxIdleConns(5)
-		sqlDB.SetConnMaxLifetime(30 * time.Minute)
-		sqlDB.SetConnMaxIdleTime(30 * time.Second)
+		sqlDB.SetMaxOpenConns(cfg.PostgreSQL.MaxOpenConns)
+		sqlDB.SetMaxIdleConns(cfg.PostgreSQL.MaxIdleConns)
+		sqlDB.SetConnMaxLifetime(time.Duration(cfg.PostgreSQL.ConnMaxLifetimeMins) * time.Minute)
+		sqlDB.SetConnMaxIdleTime(time.Duration(cfg.PostgreSQL.ConnMaxIdleTimeSecs) * time.Second)
 	}
 
 	db := &sqlDatabase{
