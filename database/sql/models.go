@@ -594,9 +594,9 @@ type FileObject struct {
 // we able to get that info easily, without preloading the blob table.
 type FileBlob struct {
 	gorm.Model
-	FileObjectID uint `gorm:"index:idx_fileobject_blob_id"`
-	// Content is a BLOB column for storing binary data
-	Content []byte
+	FileObjectID uint   `gorm:"index:idx_fileobject_blob_id"`
+	Content      []byte // SQLite only; NULL for PostgreSQL
+	LOOID        uint32 `gorm:"column:lo_oid;default:0"` // PostgreSQL Large Object OID; 0 for SQLite
 }
 
 // FileObjectTag represents the many-to-many relationship between documents and tags
