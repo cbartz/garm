@@ -31,6 +31,7 @@ import (
 	"testing"
 
 	"github.com/google/uuid"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	"github.com/stretchr/testify/require"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
@@ -39,8 +40,6 @@ import (
 	"github.com/cloudbase/garm/database/common"
 	"github.com/cloudbase/garm/params"
 	"github.com/cloudbase/garm/util/appdefaults"
-
-	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 //nolint:golangci-lint,gosec
