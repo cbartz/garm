@@ -139,6 +139,7 @@ func NewSQLDatabase(ctx context.Context, cfg config.Database) (common.Store, err
 	case config.PostgreSQLBackend:
 		// PostgreSQL reuses the main connection — no separate DB needed for blobs.
 		db.objectsConn = conn
+		db.objectsSQLDB = sqlDB
 	}
 
 	if err := db.migrateDB(); err != nil {
