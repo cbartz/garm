@@ -5,7 +5,7 @@ on:
 
 jobs:
   test-garm-runner:
-    runs-on: garm-poc-scaleset
+    runs-on: garm-poc-pg
     steps:
       - name: Verify runner
         run: |
