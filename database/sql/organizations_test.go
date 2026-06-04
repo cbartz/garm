@@ -86,12 +86,8 @@ func (s *OrgTestSuite) TearDownTest() {
 func (s *OrgTestSuite) SetupTest() {
 	ctx := context.Background()
 	watcher.InitWatcher(ctx)
-	// create testing sqlite database
-	dbConfig := garmTesting.GetTestSqliteDBConfig(s.T())
-	db, err := NewSQLDatabase(ctx, dbConfig)
-	if err != nil {
-		s.FailNow(fmt.Sprintf("failed to create db connection: %s", err))
-	}
+	// create testing database
+	db := newTestDB(s.T())
 	s.Store = db
 
 	adminCtx := garmTesting.ImpersonateAdminContext(ctx, db, s.T())
@@ -143,7 +139,7 @@ func (s *OrgTestSuite) SetupTest() {
 	}
 	s.StoreSQLMocked = &sqlDatabase{
 		conn: gormConn,
-		cfg:  dbConfig,
+		cfg:  db.(*sqlDatabase).cfg,
 	}
 
 	// setup test fixtures
@@ -338,7 +334,7 @@ func (s *OrgTestSuite) TestGetOrganizationNotFound() {
 
 func (s *OrgTestSuite) TestGetOrganizationDBDecryptingErr() {
 	s.Fixtures.SQLMock.
-		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `organizations` WHERE (name = ? COLLATE NOCASE and endpoint_name = ? COLLATE NOCASE) AND `organizations`.`deleted_at` IS NULL ORDER BY `organizations`.`id` LIMIT ?")).
+		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `organizations` WHERE (LOWER(name) = LOWER(?) and LOWER(endpoint_name) = LOWER(?)) AND `organizations`.`deleted_at` IS NULL ORDER BY `organizations`.`id` LIMIT ?")).
 		WithArgs(s.Fixtures.Orgs[0].Name, s.Fixtures.Orgs[0].Endpoint.Name, 1).
 		WillReturnRows(sqlmock.NewRows([]string{"name"}).AddRow(s.Fixtures.Orgs[0].Name))
 
@@ -514,7 +510,7 @@ func (s *OrgTestSuite) TestUpdateOrganizationDBEncryptErr() {
 			AddRow(s.Fixtures.Orgs[0].Endpoint.Name, s.Fixtures.Orgs[0].Endpoint.EndpointType))
 	// Expect credentials fetch
 	s.Fixtures.SQLMock.
-		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `github_credentials` WHERE user_id = ? AND name = ? AND `github_credentials`.`deleted_at` IS NULL ORDER BY `github_credentials`.`id` LIMIT ?")).
+		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `github_credentials` WHERE user_id = ? AND LOWER(name) = LOWER(?) AND `github_credentials`.`deleted_at` IS NULL ORDER BY `github_credentials`.`id` LIMIT ?")).
 		WithArgs(s.adminUserID, s.secondaryTestCreds.Name, 1).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "endpoint_name"}).
 			AddRow(s.secondaryTestCreds.ID, s.secondaryTestCreds.Endpoint.Name))
@@ -548,7 +544,7 @@ func (s *OrgTestSuite) TestUpdateOrganizationDBSaveErr() {
 			AddRow(s.Fixtures.Orgs[0].Endpoint.Name, s.Fixtures.Orgs[0].Endpoint.EndpointType))
 	// Expect credentials fetch
 	s.Fixtures.SQLMock.
-		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `github_credentials` WHERE user_id = ? AND name = ? AND `github_credentials`.`deleted_at` IS NULL ORDER BY `github_credentials`.`id` LIMIT ?")).
+		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `github_credentials` WHERE user_id = ? AND LOWER(name) = LOWER(?) AND `github_credentials`.`deleted_at` IS NULL ORDER BY `github_credentials`.`id` LIMIT ?")).
 		WithArgs(s.adminUserID, s.secondaryTestCreds.Name, 1).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "endpoint_name"}).
 			AddRow(s.secondaryTestCreds.ID, s.secondaryTestCreds.Endpoint.Name))
@@ -583,7 +579,7 @@ func (s *OrgTestSuite) TestUpdateOrganizationDBDecryptingErr() {
 			AddRow(s.Fixtures.Orgs[0].Endpoint.Name, s.Fixtures.Orgs[0].Endpoint.EndpointType))
 	// Expect credentials fetch
 	s.Fixtures.SQLMock.
-		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `github_credentials` WHERE user_id = ? AND name = ? AND `github_credentials`.`deleted_at` IS NULL ORDER BY `github_credentials`.`id` LIMIT ?")).
+		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `github_credentials` WHERE user_id = ? AND LOWER(name) = LOWER(?) AND `github_credentials`.`deleted_at` IS NULL ORDER BY `github_credentials`.`id` LIMIT ?")).
 		WithArgs(s.adminUserID, s.secondaryTestCreds.Name, 1).
 		WillReturnRows(sqlmock.NewRows([]string{"id", "endpoint_name"}).
 			AddRow(s.secondaryTestCreds.ID, s.secondaryTestCreds.Endpoint.Name))
@@ -682,7 +678,7 @@ func (s *OrgTestSuite) TestCreateOrganizationPoolDBFetchTagErr() {
 		WithArgs(s.Fixtures.Orgs[0].ID, 1).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(s.Fixtures.Orgs[0].ID))
 	s.Fixtures.SQLMock.
-		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `tags` WHERE name = ? COLLATE NOCASE AND `tags`.`deleted_at` IS NULL ORDER BY `tags`.`id` LIMIT ?")).
+		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `tags` WHERE LOWER(name) = LOWER(?) AND `tags`.`deleted_at` IS NULL ORDER BY `tags`.`id` LIMIT ?")).
 		WillReturnError(fmt.Errorf("mocked fetching tag error"))
 
 	entity, err := s.Fixtures.Orgs[0].GetEntity()
@@ -703,7 +699,7 @@ func (s *OrgTestSuite) TestCreateOrganizationPoolDBAddingPoolErr() {
 		WithArgs(s.Fixtures.Orgs[0].ID, 1).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(s.Fixtures.Orgs[0].ID))
 	s.Fixtures.SQLMock.
-		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `tags` WHERE name = ? COLLATE NOCASE AND `tags`.`deleted_at` IS NULL ORDER BY `tags`.`id` LIMIT ?")).
+		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `tags` WHERE LOWER(name) = LOWER(?) AND `tags`.`deleted_at` IS NULL ORDER BY `tags`.`id` LIMIT ?")).
 		WillReturnRows(sqlmock.NewRows([]string{"linux"}))
 	s.Fixtures.SQLMock.
 		ExpectExec(regexp.QuoteMeta("INSERT INTO `tags`")).
@@ -731,7 +727,7 @@ func (s *OrgTestSuite) TestCreateOrganizationPoolDBSaveTagErr() {
 		WithArgs(s.Fixtures.Orgs[0].ID, 1).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(s.Fixtures.Orgs[0].ID))
 	s.Fixtures.SQLMock.
-		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `tags` WHERE name = ? COLLATE NOCASE AND `tags`.`deleted_at` IS NULL ORDER BY `tags`.`id` LIMIT ?")).
+		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `tags` WHERE LOWER(name) = LOWER(?) AND `tags`.`deleted_at` IS NULL ORDER BY `tags`.`id` LIMIT ?")).
 		WillReturnRows(sqlmock.NewRows([]string{"linux"}))
 	s.Fixtures.SQLMock.
 		ExpectExec(regexp.QuoteMeta("INSERT INTO `tags`")).
@@ -762,7 +758,7 @@ func (s *OrgTestSuite) TestCreateOrganizationPoolDBFetchPoolErr() {
 		WithArgs(s.Fixtures.Orgs[0].ID, 1).
 		WillReturnRows(sqlmock.NewRows([]string{"id"}).AddRow(s.Fixtures.Orgs[0].ID))
 	s.Fixtures.SQLMock.
-		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `tags` WHERE name = ? COLLATE NOCASE AND `tags`.`deleted_at` IS NULL ORDER BY `tags`.`id` LIMIT ?")).
+		ExpectQuery(regexp.QuoteMeta("SELECT * FROM `tags` WHERE LOWER(name) = LOWER(?) AND `tags`.`deleted_at` IS NULL ORDER BY `tags`.`id` LIMIT ?")).
 		WillReturnRows(sqlmock.NewRows([]string{"linux"}))
 	s.Fixtures.SQLMock.
 		ExpectExec(regexp.QuoteMeta("INSERT INTO `tags`")).

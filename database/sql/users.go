@@ -19,7 +19,9 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
 	"github.com/cloudbase/garm-provider-common/util"
@@ -45,6 +47,12 @@ func (s *sqlDatabase) getUserByUsernameOrEmail(tx *gorm.DB, user string) (User, 
 }
 
 func (s *sqlDatabase) getUserByID(tx *gorm.DB, userID string) (User, error) {
+	// PostgreSQL's uuid column rejects malformed strings with a driver error
+	// rather than returning 0 rows. Pre-validate so we return ErrNotFound
+	// consistently across backends.
+	if _, err := uuid.Parse(userID); err != nil {
+		return User{}, runnerErrors.ErrNotFound
+	}
 	var dbUser User
 	q := tx.Model(&User{}).Where("id = ?", userID).First(&dbUser)
 	if q.Error != nil {
@@ -122,7 +130,7 @@ func (s *sqlDatabase) UpdateUser(_ context.Context, user string, param params.Up
 	var err error
 	var dbUser User
 	err = s.conn.Transaction(func(tx *gorm.DB) error {
-		dbUser, err = s.getUserByUsernameOrEmail(tx, user)
+		dbUser, err = s.getUserByUsernameOrEmail(tx.Clauses(clause.Locking{Strength: "UPDATE"}), user)
 		if err != nil {
 			return fmt.Errorf("error fetching user: %w", err)
 		}
