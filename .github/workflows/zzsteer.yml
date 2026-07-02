@@ -1,8 +1,0 @@
-name: steer-probe
-on:
-  workflow_dispatch:
-jobs:
-  probe:
-    runs-on: steer-test
-    steps:
-      - run: echo hi
