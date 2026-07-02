@@ -1,8 +1,0 @@
-name: drain-probe
-on:
-  workflow_dispatch:
-jobs:
-  probe:
-    runs-on: drain-test
-    steps:
-      - run: echo hello from drain-test
