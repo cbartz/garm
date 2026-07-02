@@ -1,8 +1,0 @@
-name: nosession-probe
-on:
-  workflow_dispatch:
-jobs:
-  probe:
-    runs-on: nosession-test
-    steps:
-      - run: echo hi
