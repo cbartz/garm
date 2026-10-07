@@ -23,6 +23,7 @@ import (
 	"os"
 	"unicode/utf8"
 
+	"github.com/google/uuid"
 	"github.com/h2non/filetype"
 
 	"github.com/cloudbase/garm-provider-common/cloudconfig"
@@ -31,6 +32,20 @@ import (
 	"github.com/cloudbase/garm/internal/templates"
 	"github.com/cloudbase/garm/runner/common"
 )
+
+// scaleSetPoolIDNamespace is the UUIDv5 namespace used to derive pseudo pool
+// IDs for scale sets. Instances in providers are tagged with IDs derived from
+// this namespace; changing it (or the derivation input format) orphans every
+// instance created with the previous value.
+var scaleSetPoolIDNamespace = uuid.MustParse("3f5bfba0-d82c-4f91-a5f6-ddc1c9209b01")
+
+// ScaleSetPseudoPoolID derives a stable, UUID-shaped pseudo pool ID for a
+// scale set, from the forge entity ID and the internal scale set database ID.
+// Both inputs are immutable, so the result never changes for the lifetime of
+// the scale set and always fits within provider tag/label length limits.
+func ScaleSetPseudoPoolID(entityID string, scaleSetID uint) string {
+	return uuid.NewSHA1(scaleSetPoolIDNamespace, fmt.Appendf(nil, "%s-%d", entityID, scaleSetID)).String()
+}
 
 func FetchTools(ctx context.Context, cli common.GithubClient) ([]commonParams.RunnerApplicationDownload, error) {
 	tools, ghResp, err := cli.ListEntityRunnerApplicationDownloads(ctx)
@@ -139,13 +154,19 @@ func MaybeAddWrapperToExtraSpecs(ctx context.Context, param commonParams.Bootstr
 			return param
 		}
 	}
+	if data == nil {
+		// Unmarshal returned nil. An explicit `null` was probably passed.
+		// Any other valid json would either fail to unmarshal or unmarshal
+		// into an actual map we can use.
+		return param
+	}
 
 	if _, ok := data["runner_install_template"]; ok {
 		// User has already set a runner install template override. Do not touch.
 		return param
 	}
 
-	wrapper, err := templates.RenderRunnerInstallWrapper(ctx, param.OSType, param.MetadataURL, param.InstanceToken)
+	wrapper, err := templates.RenderRunnerInstallWrapper(ctx, param.OSType, param.MetadataURL, param.CallbackURL, param.InstanceToken, param.ProxyConfig)
 	if err != nil {
 		slog.WarnContext(ctx, "failed to get runner install wrapper", "os_type", param.OSType, "error", err)
 		return param

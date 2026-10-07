@@ -39,7 +39,9 @@ import (
 	"github.com/cloudbase/garm/cache"
 	dbCommon "github.com/cloudbase/garm/database/common"
 	"github.com/cloudbase/garm/database/watcher"
+	garmErrors "github.com/cloudbase/garm/internal/errors"
 	"github.com/cloudbase/garm/locking"
+	"github.com/cloudbase/garm/metrics"
 	"github.com/cloudbase/garm/params"
 	"github.com/cloudbase/garm/runner/common"
 	garmUtil "github.com/cloudbase/garm/util"
@@ -123,14 +125,16 @@ func NewEntityPoolManager(ctx context.Context, entity params.ForgeEntity, instan
 		controllerInfo:      controllerInfo,
 		instanceTokenGetter: instanceTokenGetter,
 
-		store:       store,
-		providers:   providers,
-		quit:        make(chan struct{}),
-		jobs:        make(map[int64]params.Job),
-		checkedJobs: make(map[int64]time.Time),
-		wg:          wg,
-		backoff:     backoff,
-		consumer:    consumer,
+		store:          store,
+		providers:      providers,
+		quit:           make(chan struct{}),
+		jobs:           make(map[int64]params.Job),
+		jobTombstones:  make(map[int64]time.Time),
+		checkedJobs:    make(map[int64]time.Time),
+		clientUpdateCh: make(chan struct{}, 1),
+		wg:             wg,
+		backoff:        backoff,
+		consumer:       consumer,
 	}
 	return repo, nil
 }
@@ -147,11 +151,19 @@ type basePoolManager struct {
 
 	store dbCommon.Store
 	jobs  map[int64]params.Job
+	// jobTombstones holds the IDs of the jobs we retired from the cache and when.
+	// Reaped by reapJobTombstones.
+	jobTombstones map[int64]time.Time
 
 	providers   map[string]common.Provider
 	tools       []commonParams.RunnerApplicationDownload
 	quit        chan struct{}
 	checkedJobs map[int64]time.Time
+
+	// clientUpdateCh signals clientUpdaterLoop to rebuild the forge client
+	// after a credentials change. Capacity 1; the rebuild reads the newest
+	// entity state when it runs, so triggers coalesce.
+	clientUpdateCh chan struct{}
 
 	managerIsRunning   bool
 	managerErrorReason string
@@ -168,6 +180,8 @@ func (r *basePoolManager) getProviderBaseParams(pool params.Pool) common.Provide
 	return common.ProviderBaseParams{
 		PoolInfo:       pool,
 		ControllerInfo: r.controllerInfo,
+		EntityType:     r.entity.EntityType,
+		EntityID:       r.entity.ID,
 	}
 }
 
@@ -180,6 +194,8 @@ func (r *basePoolManager) isEntityPool(pool params.Pool) bool {
 		return pool.OrgID != "" && pool.OrgID == r.entity.ID
 	case params.ForgeEntityTypeEnterprise:
 		return pool.EnterpriseID != "" && pool.EnterpriseID == r.entity.ID
+	case params.ForgeEntityTypeInstance:
+		return pool.ForgeInstanceID != "" && pool.ForgeInstanceID == r.entity.ID
 	default:
 		return false
 	}
@@ -270,7 +286,7 @@ func (r *basePoolManager) persistJobToDB(ctx context.Context, jobParams params.J
 			"is_new_job", isNewJob,
 			"job_action", jobParams.Action,
 		)
-		return fmt.Errorf("job %d should not be recorded", jobParams.WorkflowJobID)
+		return fmt.Errorf("job %d should not be recorded: %w", jobParams.WorkflowJobID, runnerErrors.ErrUnprocessable)
 	}
 
 	slog.DebugContext(
@@ -344,13 +360,34 @@ func (r *basePoolManager) handleCompletedJob(ctx context.Context, jobParams para
 		if errors.Is(err, runnerErrors.ErrNotFound) {
 			return nil
 		}
+		var te *runnerErrors.InstanceTransitionError
+		if errors.As(err, &te) && garmErrors.InstanceIsBeingDeleted(te.From) {
+			// Another code path already moved the instance into the deletion
+			// lane; the runner is being removed, which is what we wanted.
+			return nil
+		}
 		slog.With(slog.Any("error", err)).ErrorContext(
 			ctx, "failed to update runner status",
 			"runner_name", util.SanitizeLogEntry(jobParams.RunnerName))
 		return fmt.Errorf("error updating runner: %w", err)
 	}
+	r.recordLifecycleEvent(pool, metrics.OutcomeJobCompleted)
 
 	return nil
+}
+
+// recordLifecycleEvent counts a runner removal decision made for a pool, by
+// outcome. The entity String() form is used for the owner label; a bare repo
+// name would be ambiguous across owners.
+func (r *basePoolManager) recordLifecycleEvent(pool params.Pool, outcome string) {
+	metrics.RunnerLifecycleCount.WithLabelValues(
+		outcome,                     // label: outcome
+		pool.ProviderName,           // label: provider
+		r.entity.String(),           // label: pool_owner
+		string(r.entity.EntityType), // label: pool_type
+		pool.ID,                     // label: pool_id
+		"",                          // label: scaleset_id
+	).Inc()
 }
 
 // handleInProgressJob processes an in-progress job webhook
@@ -495,7 +532,40 @@ func jobIDFromLabels(labels []string) int64 {
 	return 0
 }
 
-func (r *basePoolManager) startLoopForFunction(f func() error, interval time.Duration, name string, alwaysRun bool) {
+// rateLimitTier classifies pool loops by how they consume forge API quota.
+type rateLimitTier int
+
+const (
+	// tierInternal marks loops that make no forge API calls. They are never
+	// paused by rate limits.
+	tierInternal rateLimitTier = iota
+	// tierNormal marks loops whose forge API usage is not critical (scaling
+	// up, reconciling state, reaping). They pause once the remaining quota
+	// dips into the configured reserve.
+	tierNormal
+	// tierCritical marks loops that execute already-decided work, such as
+	// removing runners that finished their jobs. They pause only when the
+	// quota is fully exhausted.
+	tierCritical
+)
+
+// rateLimitReached reports whether a loop of the given tier should pause due
+// to the entity credentials' forge rate limit, and when the quota resets.
+// This is orthogonal to the manager running state: an unauthorized error
+// disables the manager until valid credentials produce a successful tools
+// update, regardless of the rate limit quota resetting in the meantime.
+func (r *basePoolManager) rateLimitReached(tier rateLimitTier) (bool, time.Time) {
+	switch tier {
+	case tierCritical:
+		return cache.EntityRateLimitExhausted(r.entity.ID)
+	case tierNormal:
+		return cache.EntityRateLimitReached(r.entity.ID)
+	default:
+		return false, time.Time{}
+	}
+}
+
+func (r *basePoolManager) startLoopForFunction(f func() error, interval time.Duration, name string, alwaysRun bool, tier rateLimitTier) {
 	slog.InfoContext(
 		r.ctx, "starting loop for entity",
 		"loop_name", name)
@@ -510,6 +580,7 @@ func (r *basePoolManager) startLoopForFunction(f func() error, interval time.Dur
 		r.wg.Done()
 	}()
 
+	rateLimited := false
 	for {
 		shouldRun := r.managerIsRunning
 		if alwaysRun {
@@ -519,6 +590,21 @@ func (r *basePoolManager) startLoopForFunction(f func() error, interval time.Dur
 		case true:
 			select {
 			case <-ticker.C:
+				if limited, resetAt := r.rateLimitReached(tier); limited {
+					if !rateLimited {
+						slog.InfoContext(
+							r.ctx, "rate limit reached; pausing loop until the quota resets",
+							"loop_name", name, "reset_at", resetAt)
+						rateLimited = true
+					}
+					continue
+				}
+				if rateLimited {
+					slog.InfoContext(
+						r.ctx, "rate limit lifted; resuming loop",
+						"loop_name", name)
+					rateLimited = false
+				}
 				if err := f(); err != nil {
 					slog.With(slog.Any("error", err)).ErrorContext(
 						r.ctx, "error in loop",
@@ -707,6 +793,7 @@ func (r *basePoolManager) reapTimedOutRunners(runners []forgeRunner) error {
 					"runner_name", instance.Name)
 				return fmt.Errorf("error updating runner: %w", err)
 			}
+			r.recordLifecycleEvent(pool, metrics.OutcomeBootstrapTimeout)
 		}
 	}
 	return nil
@@ -1092,6 +1179,15 @@ func (r *basePoolManager) addInstanceToProvider(instance params.Instance) error 
 		GitHubRunnerGroup: instance.GitHubRunnerGroup,
 		JitConfigEnabled:  hasJITConfig,
 	}
+
+	if pool.ProxyID != 0 {
+		proxy, ok := cache.GetProxy(pool.ProxyID)
+		if !ok {
+			return fmt.Errorf("proxy %d (%s) set on pool %s was not found in cache", pool.ProxyID, pool.ProxyName, pool.ID)
+		}
+		bootstrapArgs.ProxyConfig = proxy.ProxyConfig()
+	}
+
 	// We use the template management system unless:
 	//   * there is no template associated with the pool/scale set
 	//   * user explicitly overwrites the install template via extra specs
@@ -1128,7 +1224,13 @@ func (r *basePoolManager) addInstanceToProvider(instance params.Instance) error 
 			ProviderBaseParams: r.getProviderBaseParams(pool),
 		},
 	}
-	providerInstance, err := provider.CreateInstance(r.ctx, bootstrapArgs, createInstanceParams)
+	// Bound the create call by the pool's bootstrap timeout; past that point
+	// the runner is considered failed anyway. The provider-level exec timeout
+	// (if configured and smaller) still applies; the effective deadline is
+	// whichever is sooner.
+	createCtx, cancel := context.WithTimeout(r.ctx, time.Duration(pool.RunnerTimeout())*time.Minute)
+	defer cancel()
+	providerInstance, err := provider.CreateInstance(createCtx, bootstrapArgs, createInstanceParams)
 	if err != nil {
 		instanceIDToDelete = instance.Name
 		return fmt.Errorf("error creating instance: %w", err)
@@ -1196,6 +1298,8 @@ func (r *basePoolManager) paramsWorkflowJobToParamsJob(job params.WorkflowJob) (
 		jobParams.RepoID = &asUUID
 	case params.ForgeEntityTypeOrganization:
 		jobParams.OrgID = &asUUID
+	case params.ForgeEntityTypeInstance:
+		jobParams.ForgeInstanceID = &asUUID
 	default:
 		return jobParams, fmt.Errorf("unknown pool type: %s", r.entity.EntityType)
 	}
@@ -1288,6 +1392,7 @@ func (r *basePoolManager) scaleDownOnePool(ctx context.Context, pool params.Pool
 			if err := r.DeleteRunner(instanceToDelete, false, false); err != nil {
 				return fmt.Errorf("failed to delete instance %s: %w", instanceToDelete.ID, err)
 			}
+			r.recordLifecycleEvent(pool, metrics.OutcomeIdleScaleDown)
 			return nil
 		})
 	}
@@ -1334,7 +1439,7 @@ func (r *basePoolManager) addRunnerToPool(pool params.Pool, aditionalLabels []st
 	}
 
 	if poolInstanceCount >= int64(pool.MaxRunners) {
-		return fmt.Errorf("max workers (%d) reached for pool %s", pool.MaxRunners, pool.ID)
+		return runnerErrors.NewNoCapacityError("max workers (%d) reached for pool %s", pool.MaxRunners, pool.ID)
 	}
 
 	if err := r.AddRunner(r.ctx, pool.ID, aditionalLabels); err != nil {
@@ -1412,8 +1517,6 @@ func (r *basePoolManager) retryFailedInstancesForOnePool(ctx context.Context, po
 
 	g, errCtx := errgroup.WithContext(ctx)
 	for _, instance := range existingInstances {
-		instance := instance
-
 		if instance.Status != commonParams.InstanceError {
 			continue
 		}
@@ -1472,7 +1575,10 @@ func (r *basePoolManager) retryFailedInstancesForOnePool(ctx context.Context, po
 				ctx, "queueing previously failed instance for retry",
 				"runner_name", instance.Name)
 			// Set instance to pending create and wait for retry.
-			if _, err := r.store.UpdateInstance(r.ctx, instance.Name, updateParams); err != nil {
+			// Use ForceUpdateInstance() here. It will ignore the instance transition from error to
+			// something other than a cleanup status (pending_delete/deleting). We don't really want to allow
+			// transitioning from error directly to "creating" otherwise.
+			if _, err := r.store.ForceUpdateInstance(r.ctx, instance.Name, updateParams); err != nil {
 				slog.With(slog.Any("error", err)).ErrorContext(
 					ctx, "failed to update runner status",
 					"runner_name", instance.Name)
@@ -1875,6 +1981,7 @@ func (r *basePoolManager) Start() error {
 	}()
 
 	go r.runWatcher()
+	go r.clientUpdaterLoop()
 	go func() {
 		select {
 		case <-r.quit:
@@ -1884,16 +1991,21 @@ func (r *basePoolManager) Start() error {
 		case <-initializeEntity:
 		}
 		defer close(initializeEntity)
-		go r.startLoopForFunction(r.runnerCleanup, common.PoolReapTimeoutInterval, "timeout_reaper", false)
-		go r.startLoopForFunction(r.scaleDown, common.PoolScaleDownInterval, "scale_down", false)
+		go r.startLoopForFunction(r.runnerCleanup, common.PoolReapTimeoutInterval, "timeout_reaper", false, tierNormal)
+		go r.startLoopForFunction(r.scaleDown, common.PoolScaleDownInterval, "scale_down", false, tierNormal)
 		// always run the delete pending instances routine. This way we can still remove existing runners, even if the pool is not running.
-		go r.startLoopForFunction(r.deletePendingInstances, common.PoolConsilitationInterval, "consolidate[delete_pending]", true)
-		go r.startLoopForFunction(r.addPendingInstances, common.PoolConsilitationInterval, "consolidate[add_pending]", false)
-		go r.startLoopForFunction(r.ensureMinIdleRunners, common.PoolConsilitationInterval, "consolidate[ensure_min_idle]", false)
-		go r.startLoopForFunction(r.retryFailedInstances, common.PoolConsilitationInterval, "consolidate[retry_failed]", false)
-		go r.startLoopForFunction(r.updateTools, common.PoolToolUpdateInterval, "update_tools", true)
-		go r.startLoopForFunction(r.consumeQueuedJobs, common.PoolConsilitationInterval, "job_queue_consumer", false)
-		go r.startLoopForFunction(r.reconcileStaleJobs, common.PoolStaleJobReconcileInterval, "stale_job_reconciler", false)
+		go r.startLoopForFunction(r.deletePendingInstances, common.PoolConsilitationInterval, "consolidate[delete_pending]", true, tierCritical)
+		go r.startLoopForFunction(r.addPendingInstances, common.PoolConsilitationInterval, "consolidate[add_pending]", false, tierNormal)
+		go r.startLoopForFunction(r.ensureMinIdleRunners, common.PoolConsilitationInterval, "consolidate[ensure_min_idle]", false, tierNormal)
+		go r.startLoopForFunction(r.retryFailedInstances, common.PoolConsilitationInterval, "consolidate[retry_failed]", false, tierNormal)
+		// updateTools reads the tools cache; it makes no forge API calls and is
+		// also the path that re-enables the manager after an unauthorized error.
+		go r.startLoopForFunction(r.updateTools, common.PoolToolUpdateInterval, "update_tools", true, tierInternal)
+		go r.startLoopForFunction(r.consumeQueuedJobs, common.PoolConsilitationInterval, "job_queue_consumer", false, tierNormal)
+		go r.startLoopForFunction(r.reconcileStaleJobs, common.PoolStaleJobReconcileInterval, "stale_job_reconciler", false, tierNormal)
+		// Reaping only touches an in-memory map, so let it run even when the
+		// manager is paused. Otherwise tombstones pile up for the whole pause.
+		go r.startLoopForFunction(r.reapJobTombstones, common.PoolJobTombstoneReapInterval, "job_tombstone_reaper", true, tierInternal)
 	}()
 	return nil
 }
@@ -2174,9 +2286,15 @@ func (r *basePoolManager) consumeQueuedJobs() error {
 				"pool_id", pool.ID,
 				"job_id", job.WorkflowJobID)
 			if err := r.addRunnerToPool(pool, jobLabels); err != nil {
-				slog.With(slog.Any("error", err)).ErrorContext(
-					r.ctx, "could not add runner to pool",
-					"pool_id", pool.ID)
+				if errors.Is(err, runnerErrors.ErrNoCapacity) {
+					slog.With(slog.Any("error", err)).InfoContext(
+						r.ctx, "could not add runner to pool",
+						"pool_id", pool.ID)
+				} else {
+					slog.With(slog.Any("error", err)).ErrorContext(
+						r.ctx, "could not add runner to pool",
+						"pool_id", pool.ID)
+				}
 				continue
 			}
 			slog.DebugContext(r.ctx, "a new runner was added as a response to queued job",
@@ -2187,7 +2305,7 @@ func (r *basePoolManager) consumeQueuedJobs() error {
 		}
 
 		if !runnerCreated {
-			slog.WarnContext(
+			slog.InfoContext(
 				r.ctx, "could not create a runner for job; unlocking",
 				"job_id", job.WorkflowJobID)
 			if err := r.store.UnlockJob(r.ctx, job.WorkflowJobID, r.ID()); err != nil {
@@ -2307,6 +2425,9 @@ func (r *basePoolManager) ValidateOwner(job params.WorkflowJob) error {
 		if !strings.EqualFold(job.Enterprise.Slug, r.entity.Owner) {
 			return runnerErrors.NewBadRequestError("job not meant for this pool manager")
 		}
+	case params.ForgeEntityTypeInstance:
+		// Instance-level (system) hooks accept all jobs from the forge instance.
+		// There is no owner/slug to validate against.
 	default:
 		return runnerErrors.NewBadRequestError("unknown entity type")
 	}
@@ -2323,25 +2444,6 @@ func (r *basePoolManager) GithubRunnerRegistrationToken() (string, error) {
 		return "", fmt.Errorf("error creating runner token: %w", err)
 	}
 	return *tk.Token, nil
-}
-
-func (r *basePoolManager) FetchTools() ([]commonParams.RunnerApplicationDownload, error) {
-	tools, ghResp, err := r.ghcli.ListEntityRunnerApplicationDownloads(r.ctx)
-	if err != nil {
-		if ghResp != nil && ghResp.StatusCode == http.StatusUnauthorized {
-			return nil, runnerErrors.NewUnauthorizedError("error fetching tools")
-		}
-		return nil, fmt.Errorf("error fetching runner tools: %w", err)
-	}
-
-	ret := []commonParams.RunnerApplicationDownload{}
-	for _, tool := range tools {
-		if tool == nil {
-			continue
-		}
-		ret = append(ret, commonParams.RunnerApplicationDownload(*tool))
-	}
-	return ret, nil
 }
 
 func (r *basePoolManager) GetWebhookInfo(ctx context.Context) (params.HookInfo, error) {

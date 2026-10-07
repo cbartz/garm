@@ -22,7 +22,9 @@ import (
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
 	commonParams "github.com/cloudbase/garm-provider-common/params"
 	"github.com/cloudbase/garm/cache"
+	garmErrors "github.com/cloudbase/garm/internal/errors"
 	"github.com/cloudbase/garm/locking"
+	"github.com/cloudbase/garm/metrics"
 	"github.com/cloudbase/garm/params"
 	"github.com/cloudbase/garm/util/github/scalesets"
 )
@@ -122,11 +124,45 @@ func (w *Worker) HandleJobsCompleted(jobs []params.ScaleSetJobMessage) (err erro
 		locking.Lock(job.RunnerName, w.consumerID)
 		_, err := w.store.UpdateInstance(w.ctx, job.RunnerName, runnerUpdateParams)
 		if err != nil {
-			if !errors.Is(err, runnerErrors.ErrNotFound) {
-				locking.Unlock(job.RunnerName, false)
-				return fmt.Errorf("updating runner %s: %w", job.RunnerName, err)
+			if errors.Is(err, runnerErrors.ErrNotFound) {
+				locking.Unlock(job.RunnerName, true)
+				continue
 			}
+			// If the transition was refused because the instance is already on
+			// its way out (some other code path — reaper, consolidate, provider
+			// — is deleting it), our intent to remove the runner is already
+			// satisfied. te.From is the status seen inside the update's tx.
+			// Even if the in-flight delete later fails (deleting can bounce to
+			// error), reconciliation re-drives it to pending_delete, so skipping
+			// this update never strands the runner.
+			var te *runnerErrors.InstanceTransitionError
+			if errors.As(err, &te) && garmErrors.InstanceIsBeingDeleted(te.From) {
+				slog.InfoContext(w.ctx, "runner already being removed; ignoring completed job status update",
+					"runner_name", job.RunnerName, "from_status", te.From)
+				// The runner record still exists, so keep the lock entry;
+				// another goroutine of this worker (reaper, consolidate, scale
+				// down) may be blocked on it, and removing the entry from under
+				// a blocked waiter would let two goroutines hold the same
+				// runner's lock. The entry is removed once the record is gone.
+				locking.Unlock(job.RunnerName, false)
+				continue
+			}
+			// The instance is still in creating. The provider create call has
+			// not returned or hit its deadline yet (creates are bounded by the
+			// bootstrap timeout). But somehow the compute instance it spun up managed
+			// to finish bootstrap, accept a job and finish, within the runner bootstrap
+			// timeout. While this scenario is wildly unlikely, unless the provider is
+			// badly broken, we need to account for it.
+			if errors.As(err, &te) && garmErrors.InstanceIsProvisioning(te.From) {
+				slog.InfoContext(w.ctx, "instance is still provisioning; deferring removal to consolidation",
+					"runner_name", job.RunnerName, "from_status", te.From)
+				locking.Unlock(job.RunnerName, false)
+				continue
+			}
+			locking.Unlock(job.RunnerName, false)
+			return fmt.Errorf("updating runner %s: %w", job.RunnerName, err)
 		}
+		w.recordLifecycleEvent(metrics.OutcomeJobCompleted)
 		locking.Unlock(job.RunnerName, false)
 	}
 	return nil
@@ -158,6 +194,20 @@ func (w *Worker) HandleJobsStarted(jobs []params.ScaleSetJobMessage) (err error)
 			if errors.Is(err, runnerErrors.ErrNotFound) {
 				slog.InfoContext(w.ctx, "runner not found; handled by some other controller?", "runner_name", job.RunnerName)
 				locking.Unlock(job.RunnerName, true)
+				continue
+			}
+			// If the runner was already terminal (e.g. reaped after going missing)
+			// by the time this started message was processed, it can't transition
+			// to active and the job won't run on it (github will requeue). te.From
+			// is the status seen inside the update's tx; nothing to do here.
+			var te *garmErrors.RunnerTransitionError
+			if errors.As(err, &te) && garmErrors.RunnerIsTerminal(te.From) {
+				slog.InfoContext(w.ctx, "runner already terminal; ignoring started job status update",
+					"runner_name", job.RunnerName, "from_status", te.From)
+				// Keep the lock entry: the runner record still exists and other
+				// goroutines of this worker may be blocked on this lock. See
+				// HandleJobsCompleted for details.
+				locking.Unlock(job.RunnerName, false)
 				continue
 			}
 			locking.Unlock(job.RunnerName, false)

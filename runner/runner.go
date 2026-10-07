@@ -24,9 +24,12 @@ import (
 	"errors"
 	"fmt"
 	"hash"
+	"io"
 	"log/slog"
+	"net/http"
 	"net/url"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -37,12 +40,16 @@ import (
 	commonParams "github.com/cloudbase/garm-provider-common/params"
 	"github.com/cloudbase/garm-provider-common/util"
 	"github.com/cloudbase/garm/auth"
+	"github.com/cloudbase/garm/cache"
 	"github.com/cloudbase/garm/config"
 	dbCommon "github.com/cloudbase/garm/database/common"
+	garmErrors "github.com/cloudbase/garm/internal/errors"
+	"github.com/cloudbase/garm/metrics"
 	"github.com/cloudbase/garm/params"
 	"github.com/cloudbase/garm/runner/common"
 	"github.com/cloudbase/garm/runner/pool"
 	"github.com/cloudbase/garm/runner/providers"
+	garmUtil "github.com/cloudbase/garm/util"
 	"github.com/cloudbase/garm/util/github"
 	"github.com/cloudbase/garm/util/github/scalesets"
 	workersCommon "github.com/cloudbase/garm/workers/common"
@@ -66,19 +73,14 @@ func NewRunner(ctx context.Context, cfg config.Config, db dbCommon.Store, token 
 		return nil, fmt.Errorf("error loading providers: %w", err)
 	}
 
-	creds := map[string]config.Github{}
-
-	for _, ghcreds := range cfg.Github {
-		creds[ghcreds.Name] = ghcreds
-	}
-
 	poolManagerCtrl := &poolManagerCtrl{
-		config:        cfg,
-		store:         db,
-		token:         token,
-		repositories:  map[string]common.PoolManager{},
-		organizations: map[string]common.PoolManager{},
-		enterprises:   map[string]common.PoolManager{},
+		config:         cfg,
+		store:          db,
+		token:          token,
+		repositories:   map[string]common.PoolManager{},
+		organizations:  map[string]common.PoolManager{},
+		enterprises:    map[string]common.PoolManager{},
+		forgeInstances: map[string]common.PoolManager{},
 	}
 	runner := &Runner{
 		ctx:             ctx,
@@ -103,9 +105,10 @@ type poolManagerCtrl struct {
 	store  dbCommon.Store
 	token  auth.InstanceTokenGetter
 
-	repositories  map[string]common.PoolManager
-	organizations map[string]common.PoolManager
-	enterprises   map[string]common.PoolManager
+	repositories   map[string]common.PoolManager
+	organizations  map[string]common.PoolManager
+	enterprises    map[string]common.PoolManager
+	forgeInstances map[string]common.PoolManager
 }
 
 func (p *poolManagerCtrl) CreateRepoPoolManager(ctx context.Context, repo params.Repository, providers map[string]common.Provider, store dbCommon.Store) (common.PoolManager, error) {
@@ -234,6 +237,48 @@ func (p *poolManagerCtrl) GetEnterprisePoolManagers() (map[string]common.PoolMan
 	return p.enterprises, nil
 }
 
+func (p *poolManagerCtrl) CreateForgeInstancePoolManager(ctx context.Context, forgeInstance params.ForgeInstance, providers map[string]common.Provider, store dbCommon.Store) (common.PoolManager, error) {
+	p.mux.Lock()
+	defer p.mux.Unlock()
+
+	entity, err := forgeInstance.GetEntity()
+	if err != nil {
+		return nil, fmt.Errorf("error getting entity: %w", err)
+	}
+
+	poolManager, err := pool.NewEntityPoolManager(ctx, entity, p.token, providers, store)
+	if err != nil {
+		return nil, fmt.Errorf("error creating forge instance pool manager: %w", err)
+	}
+	p.forgeInstances[forgeInstance.ID] = poolManager
+	return poolManager, nil
+}
+
+func (p *poolManagerCtrl) GetForgeInstancePoolManager(forgeInstance params.ForgeInstance) (common.PoolManager, error) {
+	if fiPoolMgr, ok := p.forgeInstances[forgeInstance.ID]; ok {
+		return fiPoolMgr, nil
+	}
+	return nil, fmt.Errorf("forge instance %s pool manager not loaded: %w", forgeInstance.ID, runnerErrors.ErrNotFound)
+}
+
+func (p *poolManagerCtrl) DeleteForgeInstancePoolManager(forgeInstance params.ForgeInstance) error {
+	p.mux.Lock()
+	defer p.mux.Unlock()
+
+	poolMgr, ok := p.forgeInstances[forgeInstance.ID]
+	if ok {
+		if err := poolMgr.Stop(); err != nil {
+			return fmt.Errorf("error stopping forge instance pool manager: %w", err)
+		}
+		delete(p.forgeInstances, forgeInstance.ID)
+	}
+	return nil
+}
+
+func (p *poolManagerCtrl) GetForgeInstancePoolManagers() (map[string]common.PoolManager, error) {
+	return p.forgeInstances, nil
+}
+
 type Runner struct {
 	mux sync.Mutex
 
@@ -249,10 +294,41 @@ type Runner struct {
 	quit      chan struct{}
 	running   bool
 
-	failedEntities    map[string]failedEntity
-	reposLoaded       bool
-	orgsLoaded        bool
-	enterprisesLoaded bool
+	failedEntities       map[string]failedEntity
+	reposLoaded          bool
+	orgsLoaded           bool
+	enterprisesLoaded    bool
+	forgeInstancesLoaded bool
+}
+
+// validateReleasesURL fetches a garm-agent releases URL and checks that it
+// responds with a list of releases. It is called when the URL is changed on
+// the controller, so a misconfigured endpoint is rejected at update time
+// instead of failing silently in the sync worker later.
+func validateReleasesURL(ctx context.Context, releasesURL string) error {
+	reqCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, releasesURL, nil)
+	if err != nil {
+		return runnerErrors.NewBadRequestError("invalid garm_agent_releases_url: %q", err)
+	}
+	resp, err := http.DefaultClient.Do(req) // #nosec G704 -- validating the admin-supplied URL is the point of this function
+	if err != nil {
+		return runnerErrors.NewBadRequestError("failed to fetch garm_agent_releases_url: %q", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return runnerErrors.NewBadRequestError("garm_agent_releases_url returned status %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return runnerErrors.NewBadRequestError("failed to read response from garm_agent_releases_url: %q", err)
+	}
+	if _, err := garmUtil.ParseReleaseList(data); err != nil {
+		return runnerErrors.NewBadRequestError("garm_agent_releases_url does not expose a github compatible list of releases: %q", err)
+	}
+	return nil
 }
 
 // UpdateController will update the controller settings.
@@ -271,6 +347,14 @@ func (r *Runner) UpdateController(ctx context.Context, param params.UpdateContro
 			return params.ControllerInfo{}, fmt.Errorf("failed to sanitize CA bundle: %w", err)
 		}
 		param.CACertBundle = sanitized
+	}
+
+	// A new releases URL must expose a valid release list before we accept
+	// it. An empty value resets to the default URL, which is known good.
+	if param.GARMAgentReleasesURL != nil && *param.GARMAgentReleasesURL != "" {
+		if err := validateReleasesURL(ctx, *param.GARMAgentReleasesURL); err != nil {
+			return params.ControllerInfo{}, err
+		}
 	}
 
 	info, err := r.store.UpdateController(param)
@@ -298,11 +382,11 @@ func (r *Runner) ForceToolsSync(ctx context.Context) (params.ControllerInfo, err
 		return params.ControllerInfo{}, runnerErrors.NewConflictError("GARM agent tools sync is disabled")
 	}
 
-	// Reset the timestamp to nil to trigger force sync
+	// Reset the cached index to trigger force sync.
 	// This will cause the watcher to pick up the change and sync immediately
-	err = r.store.UpdateCachedGARMAgentRelease(nil, time.Time{})
+	err = r.store.UpdateCachedGARMAgentReleases(nil, time.Time{})
 	if err != nil {
-		return params.ControllerInfo{}, fmt.Errorf("error resetting cached release timestamp: %w", err)
+		return params.ControllerInfo{}, fmt.Errorf("error resetting cached release index: %w", err)
 	}
 
 	// Get updated controller info
@@ -403,6 +487,16 @@ func (r *Runner) loadReposOrgsAndEnterprises() {
 	}
 	for _, enterprise := range enterprises {
 		r.createAndStartEnterprisePoolManager(enterprise)
+	}
+
+	forgeInstances, err := r.store.ListForgeInstances(r.ctx, params.ForgeInstanceFilter{})
+	if err != nil {
+		slog.ErrorContext(r.ctx, "fetching forge instances", "error", err)
+	} else {
+		r.forgeInstancesLoaded = true
+	}
+	for _, fi := range forgeInstances {
+		r.createAndStartForgeInstancePoolManager(fi)
 	}
 }
 
@@ -559,6 +653,22 @@ func (r *Runner) retryFailedPoolManagers() {
 		}
 	}
 
+	if !r.forgeInstancesLoaded {
+		forgeInstances, err := r.store.ListForgeInstances(r.ctx, params.ForgeInstanceFilter{})
+		if err != nil {
+			slog.ErrorContext(r.ctx, "retrying forge instance list", "error", err)
+		} else {
+			slog.InfoContext(r.ctx, "forge instances loaded successfully after retry")
+			r.forgeInstancesLoaded = true
+			for _, fi := range forgeInstances {
+				if _, err := r.poolManagerCtrl.GetForgeInstancePoolManager(fi); err == nil {
+					continue
+				}
+				r.createAndStartForgeInstancePoolManager(fi)
+			}
+		}
+	}
+
 	// Retry individual failed entities.
 	for id, fe := range r.failedEntities {
 		if !r.backoff.ShouldRetry(id) {
@@ -629,6 +739,25 @@ func (r *Runner) retryFailedEntity(fe failedEntity) {
 			return
 		}
 		r.createAndStartEnterprisePoolManager(enterprise)
+	case params.ForgeEntityTypeInstance:
+		fi, err := r.store.GetForgeInstanceByID(r.ctx, fe.id)
+		if err != nil {
+			if errors.Is(err, runnerErrors.ErrNotFound) {
+				slog.InfoContext(r.ctx, "forge instance deleted, removing from retry set", "forge_instance_id", fe.id)
+				delete(r.failedEntities, fe.id)
+				r.backoff.RecordSuccess(fe.id)
+				return
+			}
+			slog.ErrorContext(r.ctx, "fetching forge instance for retry", "forge_instance_id", fe.id, "error", err)
+			r.backoff.RecordFailure(fe.id)
+			return
+		}
+		if err := r.poolManagerCtrl.DeleteForgeInstancePoolManager(fi); err != nil {
+			slog.ErrorContext(r.ctx, "cleaning up stale forge instance pool manager before retry", "forge_instance_id", fe.id, "error", err)
+			r.backoff.RecordFailure(fe.id)
+			return
+		}
+		r.createAndStartForgeInstancePoolManager(fi)
 	}
 }
 
@@ -655,6 +784,11 @@ func (r *Runner) Stop() error {
 	enterprises, err := r.poolManagerCtrl.GetEnterprisePoolManagers()
 	if err != nil {
 		return fmt.Errorf("error fetching enterprise pool managers: %w", err)
+	}
+
+	forgeInstances, err := r.poolManagerCtrl.GetForgeInstancePoolManagers()
+	if err != nil {
+		return fmt.Errorf("error fetching forge instance pool managers: %w", err)
 	}
 
 	g, _ := errgroup.WithContext(r.ctx)
@@ -687,6 +821,17 @@ func (r *Runner) Stop() error {
 			err := poolMgr.Stop()
 			if err != nil {
 				return fmt.Errorf("failed to stop enterprise pool manager: %w", err)
+			}
+			return poolMgr.Wait()
+		})
+	}
+
+	for _, fi := range forgeInstances {
+		poolMgr := fi
+		g.Go(func() error {
+			err := poolMgr.Stop()
+			if err != nil {
+				return fmt.Errorf("failed to stop forge instance pool manager: %w", err)
 			}
 			return poolMgr.Wait()
 		})
@@ -872,17 +1017,22 @@ func (r *Runner) DispatchWorkflowJob(hookTargetType, signature string, forgeType
 			"enterprise", util.SanitizeLogEntry(job.Enterprise.Slug),
 			"endpoint", endpoint.Name)
 		poolManager, err = r.findEnterprisePoolManager(job.Enterprise.Slug, endpoint.Name)
+	case SystemHook:
+		slog.DebugContext(
+			r.ctx, "got hook for forge instance",
+			"endpoint", endpoint.Name)
+		poolManager, err = r.findForgeInstancePoolManager(endpoint.Name)
 	default:
 		return runnerErrors.NewBadRequestError("cannot handle hook target type %s", hookTargetType)
 	}
 
-	slog.DebugContext(r.ctx, "found pool manager", "pool_manager", poolManager.ID())
 	if err != nil {
 		slog.ErrorContext(r.ctx, "failed to find pool manager", "error", err, "hook_target_type", hookTargetType)
 		// We don't have a repository or organization configured that
 		// can handle this workflow job.
 		return fmt.Errorf("error fetching poolManager: %w", err)
 	}
+	slog.DebugContext(r.ctx, "found pool manager", "pool_manager", poolManager.ID())
 
 	// We found a pool. Validate the webhook job. If a secret is configured,
 	// we make sure that the source of this workflow job is valid.
@@ -893,7 +1043,7 @@ func (r *Runner) DispatchWorkflowJob(hookTargetType, signature string, forgeType
 	}
 
 	if err := poolManager.HandleWorkflowJob(job); err != nil {
-		slog.ErrorContext(r.ctx, "failed to handle workflow job", "error", err)
+		slog.WarnContext(r.ctx, "failed to handle workflow job", "error", err)
 		return fmt.Errorf("error handling workflow job: %w", err)
 	}
 
@@ -965,6 +1115,12 @@ func (r *Runner) AddInstanceStatusMessage(ctx context.Context, param params.Inst
 	}
 
 	if _, err := r.store.UpdateInstance(r.ctx, instanceName, updateParams); err != nil {
+		var te *garmErrors.RunnerTransitionError
+		if errors.As(err, &te) && garmErrors.RunnerIsTerminal(te.From) {
+			// The runner is already terminal (e.g. reaped after going missing);
+			// its self-reported status update is moot.
+			return nil
+		}
 		return fmt.Errorf("error updating runner agent ID: %w", err)
 	}
 
@@ -1035,6 +1191,13 @@ func (r *Runner) getPoolManagerFromInstance(ctx context.Context, instance params
 		if err != nil {
 			return nil, fmt.Errorf("error fetching pool manager for enterprise %s: %w", pool.EnterpriseName, err)
 		}
+	case pool.ForgeInstanceID != "":
+		poolMgr, err = r.findForgeInstancePoolManager(pool.Endpoint.Name)
+		if err != nil {
+			return nil, fmt.Errorf("error fetching pool manager for forge instance %s: %w", pool.Endpoint.Name, err)
+		}
+	default:
+		return nil, fmt.Errorf("pool %s has no associated entity", pool.ID)
 	}
 
 	return poolMgr, nil
@@ -1112,10 +1275,65 @@ func (r *Runner) DeleteRunner(ctx context.Context, instanceName string, forceDel
 	}
 	_, err = r.store.UpdateInstance(r.ctx, instance.Name, updateParams)
 	if err != nil {
+		var te *runnerErrors.InstanceTransitionError
+		if errors.As(err, &te) && garmErrors.InstanceIsBeingDeleted(te.From) {
+			// Another code path already moved the instance into the deletion
+			// lane; the deletion the caller asked for is already under way.
+			return nil
+		}
 		return fmt.Errorf("error updating runner state: %w", err)
 	}
+	recordManualDeleteEvent(instance)
 
 	return nil
+}
+
+// recordManualDeleteEvent counts an explicit, API-driven runner removal on
+// the lifecycle metric. Labels are resolved from the in-memory cache. The
+// entity String() form is used for the owner label; a bare repo name would
+// be ambiguous across owners.
+func recordManualDeleteEvent(instance params.Instance) {
+	var provider, poolType, entityID string
+	switch {
+	case instance.PoolID != "":
+		pool, ok := cache.GetPoolByID(instance.PoolID)
+		if !ok {
+			return
+		}
+		provider = pool.ProviderName
+		poolType = string(pool.PoolType())
+		if entity, err := pool.GetEntity(); err == nil {
+			entityID = entity.ID
+		}
+	case instance.ScaleSetID != 0:
+		scaleSet, ok := cache.GetScaleSetByID(instance.ScaleSetID)
+		if !ok {
+			return
+		}
+		provider = scaleSet.ProviderName
+		poolType = string(scaleSet.ScaleSetType())
+		if entity, err := scaleSet.GetEntity(); err == nil {
+			entityID = entity.ID
+		}
+	default:
+		return
+	}
+	var owner string
+	if cachedEntity, ok := cache.GetEntity(entityID); ok {
+		owner = cachedEntity.String()
+	}
+	var scaleSetID string
+	if instance.ScaleSetID != 0 {
+		scaleSetID = strconv.FormatUint(uint64(instance.ScaleSetID), 10)
+	}
+	metrics.RunnerLifecycleCount.WithLabelValues(
+		metrics.OutcomeManualDelete, // label: outcome
+		provider,                    // label: provider
+		owner,                       // label: pool_owner
+		poolType,                    // label: pool_type
+		instance.PoolID,             // label: pool_id
+		scaleSetID,                  // label: scaleset_id
+	).Inc()
 }
 
 func (r *Runner) getGHCliFromInstance(ctx context.Context, instance params.Instance) (common.GithubClient, *scalesets.ScaleSetClient, error) {

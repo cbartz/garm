@@ -10,6 +10,7 @@ import {
   RepositoriesApi,
   OrganizationsApi,
   EnterprisesApi,
+  ForgeInstancesApi,
   PoolsApi,
   ScalesetsApi,
   InstancesApi,
@@ -17,10 +18,15 @@ import {
   FirstRunApi,
   HooksApi,
   TemplatesApi,
+  ProxiesApi,
   ObjectsApi,
+  ToolsApi,
+  type GARMAgentRelease,
   type Repository,
   type Organization,
   type Enterprise,
+  type ForgeInstance,
+  type CreateForgeInstanceParams,
   type ForgeEndpoint,
   type Pool,
   type ScaleSet,
@@ -31,6 +37,9 @@ import {
   type Template,
   type CreateTemplateParams,
   type UpdateTemplateParams,
+  type Proxy,
+  type CreateProxyParams,
+  type UpdateProxyParams,
   type CreateRepoParams,
   type CreateOrgParams,
   type CreateEnterpriseParams,
@@ -64,6 +73,8 @@ export type {
   Repository,
   Organization,
   Enterprise,
+  ForgeInstance,
+  CreateForgeInstanceParams,
   ForgeEndpoint as Endpoint,
   Pool,
   ScaleSet,
@@ -74,6 +85,9 @@ export type {
   Template,
   CreateTemplateParams,
   UpdateTemplateParams,
+  Proxy,
+  CreateProxyParams,
+  UpdateProxyParams,
   CreateRepoParams,
   CreateOrgParams,
   CreateEnterpriseParams,
@@ -127,6 +141,7 @@ export class GeneratedGarmApiClient {
   private repositoriesApi: RepositoriesApi;
   private organizationsApi: OrganizationsApi;
   private enterprisesApi: EnterprisesApi;
+  private forgeInstancesApi: ForgeInstancesApi;
   private poolsApi: PoolsApi;
   private scaleSetsApi: ScalesetsApi;
   private instancesApi: InstancesApi;
@@ -134,7 +149,9 @@ export class GeneratedGarmApiClient {
   private firstRunApi: FirstRunApi;
   private hooksApi: HooksApi;
   private templatesApi: TemplatesApi;
+  private proxiesApi: ProxiesApi;
   private objectsApi: ObjectsApi;
+  private toolsApi: ToolsApi;
 
   constructor(baseUrl: string = '') {
     this.baseUrl = baseUrl || window.location.origin;
@@ -160,6 +177,7 @@ export class GeneratedGarmApiClient {
     this.repositoriesApi = new RepositoriesApi(this.config);
     this.organizationsApi = new OrganizationsApi(this.config);
     this.enterprisesApi = new EnterprisesApi(this.config);
+    this.forgeInstancesApi = new ForgeInstancesApi(this.config);
     this.poolsApi = new PoolsApi(this.config);
     this.scaleSetsApi = new ScalesetsApi(this.config);
     this.instancesApi = new InstancesApi(this.config);
@@ -167,7 +185,9 @@ export class GeneratedGarmApiClient {
     this.firstRunApi = new FirstRunApi(this.config);
     this.hooksApi = new HooksApi(this.config);
     this.templatesApi = new TemplatesApi(this.config);
+    this.proxiesApi = new ProxiesApi(this.config);
     this.objectsApi = new ObjectsApi(this.config);
+    this.toolsApi = new ToolsApi(this.config);
   }
 
   // Set authentication token
@@ -195,6 +215,7 @@ export class GeneratedGarmApiClient {
     this.repositoriesApi = new RepositoriesApi(this.config);
     this.organizationsApi = new OrganizationsApi(this.config);
     this.enterprisesApi = new EnterprisesApi(this.config);
+    this.forgeInstancesApi = new ForgeInstancesApi(this.config);
     this.poolsApi = new PoolsApi(this.config);
     this.scaleSetsApi = new ScalesetsApi(this.config);
     this.instancesApi = new InstancesApi(this.config);
@@ -415,6 +436,20 @@ export class GeneratedGarmApiClient {
     const response = await this.hooksApi.getOrgWebhookInfo(orgId);
     return response.data;
   }
+
+  async installForgeInstanceWebhook(forgeInstanceId: string, params: any = {}): Promise<void> {
+    await this.forgeInstancesApi.installForgeInstanceWebhook(forgeInstanceId, params);
+  }
+
+  async uninstallForgeInstanceWebhook(forgeInstanceId: string): Promise<void> {
+    await this.forgeInstancesApi.uninstallForgeInstanceWebhook(forgeInstanceId);
+  }
+
+  async getForgeInstanceWebhookInfo(forgeInstanceId: string): Promise<HookInfo> {
+    const response = await this.forgeInstancesApi.getForgeInstanceWebhookInfo(forgeInstanceId);
+    return response.data;
+  }
+
   async listOrganizations(): Promise<Organization[]> {
     const response = await this.organizationsApi.listOrgs();
     return response.data || [];
@@ -491,6 +526,46 @@ export class GeneratedGarmApiClient {
 
   async createEnterprisePool(id: string, params: CreatePoolParams): Promise<Pool> {
     const response = await this.enterprisesApi.createEnterprisePool(id, params);
+    return response.data;
+  }
+
+  // Forge Instances
+  async listForgeInstances(endpoint?: string): Promise<ForgeInstance[]> {
+    const response = await this.forgeInstancesApi.listForgeInstances(endpoint);
+    return response.data || [];
+  }
+
+  async getForgeInstance(id: string): Promise<ForgeInstance> {
+    const response = await this.forgeInstancesApi.getForgeInstance(id);
+    return response.data;
+  }
+
+  async createForgeInstance(params: CreateForgeInstanceParams): Promise<ForgeInstance> {
+    const response = await this.forgeInstancesApi.createForgeInstance(params);
+    return response.data;
+  }
+
+  async updateForgeInstance(id: string, params: UpdateEntityParams): Promise<ForgeInstance> {
+    const response = await this.forgeInstancesApi.updateForgeInstance(id, params);
+    return response.data;
+  }
+
+  async deleteForgeInstance(id: string): Promise<void> {
+    await this.forgeInstancesApi.deleteForgeInstance(id);
+  }
+
+  async listForgeInstancePools(id: string): Promise<Pool[]> {
+    const response = await this.forgeInstancesApi.listForgeInstancePools(id);
+    return response.data || [];
+  }
+
+  async listForgeInstanceInstances(id: string): Promise<Instance[]> {
+    const response = await this.forgeInstancesApi.listForgeInstanceInstances(id);
+    return response.data || [];
+  }
+
+  async createForgeInstancePool(id: string, params: CreatePoolParams): Promise<Pool> {
+    const response = await this.forgeInstancesApi.createForgeInstancePool(id, params);
     return response.data;
   }
 
@@ -616,6 +691,11 @@ export class GeneratedGarmApiClient {
     return response.data;
   }
 
+  async listGARMAgentReleases(): Promise<GARMAgentRelease[]> {
+    const response = await this.toolsApi.listGARMAgentReleases();
+    return response.data || [];
+  }
+
   // Templates
   async listTemplates(osType?: string, partialName?: string, forgeType?: string): Promise<Template[]> {
     const response = await this.templatesApi.listTemplates(osType, partialName, forgeType);
@@ -643,6 +723,31 @@ export class GeneratedGarmApiClient {
 
   async restoreTemplates(params: RestoreTemplateRequest): Promise<void> {
     await this.templatesApi.restoreTemplates(params);
+  }
+
+  // Proxies
+  async listProxies(): Promise<Proxy[]> {
+    const response = await this.proxiesApi.listProxies();
+    return response.data || [];
+  }
+
+  async getProxy(id: number): Promise<Proxy> {
+    const response = await this.proxiesApi.getProxy(id);
+    return response.data;
+  }
+
+  async createProxy(params: CreateProxyParams): Promise<Proxy> {
+    const response = await this.proxiesApi.createProxy(params);
+    return response.data;
+  }
+
+  async updateProxy(id: number, params: UpdateProxyParams): Promise<Proxy> {
+    const response = await this.proxiesApi.updateProxy(id, params);
+    return response.data;
+  }
+
+  async deleteProxy(id: number): Promise<void> {
+    await this.proxiesApi.deleteProxy(id);
   }
 
   // File Object methods

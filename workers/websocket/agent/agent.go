@@ -50,13 +50,12 @@ func NewAgent(ctx context.Context, conn *websocket.Conn, instance params.Instanc
 	)
 
 	return &Agent{
-		ctx:           ctx,
-		conn:          conn,
-		instance:      instance,
-		agentStore:    store,
-		done:          closed,
-		consumerID:    consumerID,
-		shellSessions: make(map[string]*ClientSession),
+		ctx:        ctx,
+		conn:       conn,
+		instance:   instance,
+		agentStore: store,
+		done:       closed,
+		consumerID: consumerID,
 	}, nil
 }
 
@@ -74,14 +73,20 @@ type Agent struct {
 	running atomic.Bool
 	done    chan struct{}
 
-	shellSessions map[string]*ClientSession
+	// shellSessions maps a session ID string to its *ClientSession.
+	// It is a sync.Map because it is read from the runner-driven agentReader
+	// goroutine (handleShell*) concurrently with writes from the admin's
+	// shell handler goroutine (CreateShellSession/RemoveClientSession). A plain
+	// map here would let a compromised runner trigger a fatal
+	// "concurrent map read and map write" and crash the controller.
+	shellSessions sync.Map
 }
 
 func (a *Agent) CreateShellSession(ctx context.Context, sessionID uuid.UUID, clientConn *websocket.Conn) (*ClientSession, error) {
 	a.mux.Lock()
 	defer a.mux.Unlock()
 
-	_, ok := a.shellSessions[sessionID.String()]
+	_, ok := a.shellSessions.Load(sessionID.String())
 	if ok {
 		return nil, runnerErrors.NewConflictError("session ID %q already in use", sessionID)
 	}
@@ -104,25 +109,23 @@ func (a *Agent) CreateShellSession(ctx context.Context, sessionID uuid.UUID, cli
 		sess.Stop()
 		return nil, fmt.Errorf("agent shell is disabled")
 	}
-	a.shellSessions[sessionID.String()] = sess
+	a.shellSessions.Store(sessionID.String(), sess)
 	return sess, nil
 }
 
-func (a *Agent) RemoveClientSession(sessionID uuid.UUID, safe bool) error {
-	if !safe {
-		a.mux.Lock()
-		defer a.mux.Unlock()
-	}
-	sess, ok := a.shellSessions[sessionID.String()]
+func (a *Agent) RemoveClientSession(sessionID uuid.UUID) error {
+	// LoadAndDelete atomically removes the session, so concurrent callers
+	// (e.g. the runner-driven handleShellExit and the shell handler's defer)
+	// don't double-stop it. sync.Map makes this safe without a.mux.
+	val, ok := a.shellSessions.LoadAndDelete(sessionID.String())
 	if !ok {
 		return nil
 	}
+	sess := val.(*ClientSession)
 
 	if err := sess.Stop(); err != nil {
 		return fmt.Errorf("failed to stop session")
 	}
-
-	delete(a.shellSessions, sessionID.String())
 	return nil
 }
 
@@ -165,25 +168,37 @@ func (a *Agent) Start() error {
 }
 
 func (a *Agent) Stop() error {
-	a.mux.Lock()
-	defer a.mux.Unlock()
-
-	if !a.running.Load() {
+	if !a.running.CompareAndSwap(true, false) {
 		return nil
 	}
-	slog.InfoContext(a.ctx, "removing sessions")
-	for _, val := range a.shellSessions {
-		slog.InfoContext(a.ctx, "removing session", "session_id", val.sessionID)
-		a.RemoveClientSession(val.sessionID, true)
-	}
 
-	a.running.Store(false)
+	// Detach from the event pipeline first: closing the consumer removes it
+	// from the watcher's dispatch fan-out immediately, and closing a.done
+	// makes loop() exit so it stops contending for a.mux. Both are fast and
+	// must happen before the slow peer writes below, otherwise a dead client
+	// could keep this consumer in the fan-out (stalling global dispatch) for
+	// the duration of the teardown.
+	if a.consumer != nil {
+		a.consumer.Close()
+	}
+	close(a.done)
+
+	// The remaining teardown performs websocket writes that can each block up
+	// to the write deadline against a dead peer. It deliberately holds no
+	// mutex: loop() is already exiting, and nothing else may be stalled behind
+	// these writes.
+	slog.InfoContext(a.ctx, "removing sessions")
+	a.shellSessions.Range(func(_, val any) bool {
+		sess := val.(*ClientSession)
+		slog.InfoContext(a.ctx, "removing session", "session_id", sess.sessionID)
+		a.RemoveClientSession(sess.sessionID)
+		return true
+	})
+
 	slog.InfoContext(a.ctx, "sending websocket close message")
 	a.writeMessage(websocket.CloseMessage, websocket.FormatCloseMessage(websocket.CloseNormalClosure, ""))
 	slog.InfoContext(a.ctx, "closing connection")
 	a.conn.Close()
-	slog.InfoContext(a.ctx, "closing done channel")
-	close(a.done)
 	return nil
 }
 
@@ -266,14 +281,30 @@ func (a *Agent) handleShellReady(agentMsg messaging.AgentMessage, raw []byte) er
 	if err != nil {
 		return fmt.Errorf("failed to unmarshal shell ready message: %w", err)
 	}
-	session, ok := a.shellSessions[shellReady.ID()]
+	val, ok := a.shellSessions.Load(shellReady.ID())
 	if !ok {
 		return nil
 	}
+	session := val.(*ClientSession)
 	if err := session.Write(raw); err != nil {
+		a.dropDeadSession(session, err)
 		return fmt.Errorf("failed to write message: %w", err)
 	}
 	return nil
+}
+
+// dropDeadSession tears down a shell session whose client is unreachable.
+// Keeping it around would stall every subsequent write to that client on the
+// 10s write deadline; the user can open a new shell to reconnect. The client
+// connection already has a write error recorded, so the close frames sent by
+// RemoveClientSession return immediately rather than blocking.
+func (a *Agent) dropDeadSession(session *ClientSession, cause error) {
+	slog.WarnContext(a.ctx, "dropping unreachable shell session",
+		"session_id", session.sessionID, "error", cause)
+	if err := a.RemoveClientSession(session.sessionID); err != nil {
+		slog.ErrorContext(a.ctx, "failed to remove dead shell session",
+			"session_id", session.sessionID, "error", err)
+	}
 }
 
 func (a *Agent) handleShellExit(agentMsg messaging.AgentMessage) error {
@@ -281,11 +312,12 @@ func (a *Agent) handleShellExit(agentMsg messaging.AgentMessage) error {
 	if err != nil {
 		return fmt.Errorf("failed to unmarshal shell exit message: %w", err)
 	}
-	session, ok := a.shellSessions[shellExit.ID()]
+	val, ok := a.shellSessions.Load(shellExit.ID())
 	if !ok {
 		return nil
 	}
-	if err := a.RemoveClientSession(session.sessionID, false); err != nil {
+	session := val.(*ClientSession)
+	if err := a.RemoveClientSession(session.sessionID); err != nil {
 		return fmt.Errorf("failed to remove session: %w", err)
 	}
 	return nil
@@ -296,11 +328,13 @@ func (a *Agent) handleShellData(agentMsg messaging.AgentMessage, raw []byte) err
 	if err != nil {
 		return fmt.Errorf("failed to unmarshal shell data message: %w", err)
 	}
-	session, ok := a.shellSessions[shellData.ID()]
+	val, ok := a.shellSessions.Load(shellData.ID())
 	if !ok {
 		return nil
 	}
+	session := val.(*ClientSession)
 	if err := session.Write(raw); err != nil {
+		a.dropDeadSession(session, err)
 		return fmt.Errorf("failed to write message: %w", err)
 	}
 	return nil
@@ -383,7 +417,11 @@ func (a *Agent) loop() {
 			return
 		case <-a.done:
 			return
-		case payload := <-a.consumer.Watch():
+		case payload, ok := <-a.consumer.Watch():
+			if !ok {
+				// Consumer was closed (Stop closes it). Exit the loop.
+				return
+			}
 			instance, ok := payload.Payload.(params.Instance)
 			if !ok {
 				continue

@@ -13,6 +13,7 @@ docs/ControllerInfo.md
 docs/ControllerInfoApi.md
 docs/CreateEnterpriseParams.md
 docs/CreateFileObjectParams.md
+docs/CreateForgeInstanceParams.md
 docs/CreateGARMToolParams.md
 docs/CreateGiteaCredentialsParams.md
 docs/CreateGiteaEndpointParams.md
@@ -20,6 +21,7 @@ docs/CreateGithubCredentialsParams.md
 docs/CreateGithubEndpointParams.md
 docs/CreateOrgParams.md
 docs/CreatePoolParams.md
+docs/CreateProxyParams.md
 docs/CreateRepoParams.md
 docs/CreateScaleSetParams.md
 docs/CreateTemplateParams.md
@@ -35,6 +37,10 @@ docs/FirstRunApi.md
 docs/ForgeCredentials.md
 docs/ForgeEndpoint.md
 docs/ForgeEntity.md
+docs/ForgeInstance.md
+docs/ForgeInstancesApi.md
+docs/GARMAgentRelease.md
+docs/GARMAgentReleaseAsset.md
 docs/GARMAgentTool.md
 docs/GARMAgentToolsPaginatedResponse.md
 docs/GARMAgentToolsPaginatedResponseResultsInner.md
@@ -63,6 +69,8 @@ docs/PoolManagerStatus.md
 docs/PoolsApi.md
 docs/Provider.md
 docs/ProvidersApi.md
+docs/ProxiesApi.md
+docs/Proxy.md
 docs/RepositoriesApi.md
 docs/Repository.md
 docs/RestoreTemplateRequest.md
@@ -83,6 +91,7 @@ docs/UpdateGiteaEndpointParams.md
 docs/UpdateGithubCredentialsParams.md
 docs/UpdateGithubEndpointParams.md
 docs/UpdatePoolParams.md
+docs/UpdateProxyParams.md
 docs/UpdateScaleSetParams.md
 docs/UpdateTemplateParams.md
 docs/User.md

@@ -22,6 +22,7 @@ import (
 
 	"golang.org/x/sync/errgroup"
 
+	"github.com/cloudbase/garm/cache"
 	dbCommon "github.com/cloudbase/garm/database/common"
 	"github.com/cloudbase/garm/database/watcher"
 	"github.com/cloudbase/garm/params"
@@ -194,7 +195,7 @@ func (c *Controller) Stop() error {
 // The scale set worker will then need to cross check the existing runners in Github with the sate
 // in the database. Any inconsistencies will be reconciliated. This cleans up any manually removed
 // runners in either github or the providers.
-func (c *Controller) ConsolidateRunnerState(byScaleSetID map[int][]params.RunnerReference) error {
+func (c *Controller) ConsolidateRunnerState(listedAt time.Time, byScaleSetID map[int][]params.RunnerReference) error {
 	g, ctx := errgroup.WithContext(c.ctx)
 	c.ScaleSets.Range(func(_, value any) bool {
 		set := value.(*scaleSet)
@@ -204,7 +205,7 @@ func (c *Controller) ConsolidateRunnerState(byScaleSetID map[int][]params.Runner
 		runners := byScaleSetID[set.scaleSet.ScaleSetID]
 		g.Go(func() error {
 			slog.DebugContext(ctx, "consolidating runners for scale set", "scale_set_id", set.scaleSet.ScaleSetID, "runners", runners)
-			if err := set.worker.consolidateRunnerState(runners); err != nil {
+			if err := set.worker.consolidateRunnerState(listedAt, runners); err != nil {
 				return fmt.Errorf("consolidating runners for scale set %d: %w", set.scaleSet.ScaleSetID, err)
 			}
 			return nil
@@ -243,6 +244,14 @@ func (c *Controller) retryFailedScaleSets() {
 	defer c.mux.Unlock()
 
 	if !c.running {
+		return
+	}
+
+	// Starting a scale set worker involves several forge calls (runner
+	// group lookup, scale set reconciliation), which cannot succeed on an
+	// exhausted quota. Retrying would only churn logs and backoff state.
+	if limited, resetAt := cache.EntityRateLimitExhausted(c.Entity.ID); limited {
+		slog.DebugContext(c.ctx, "rate limit exhausted; deferring scale set retries", "reset_at", resetAt)
 		return
 	}
 

@@ -4,6 +4,7 @@
 	import { auth, authStore } from '$lib/stores/auth.js';
 	import { websocketStore } from '$lib/stores/websocket.js';
 	import { themeStore } from '$lib/stores/theme.js';
+	import { eagerCache } from '$lib/stores/eager-cache.js';
 	import { onMount } from 'svelte';
 
 	let mobileMenuOpen = false;
@@ -12,6 +13,7 @@
 	// WebSocket connection status
 	$: wsState = $websocketStore;
 	$: darkMode = $themeStore;
+	$: serverVersion = $eagerCache.controllerInfo?.version || '';
 
 	// Close mobile menu when route changes  
 	$: $page.url.pathname && (mobileMenuOpen = false);
@@ -61,6 +63,11 @@
 			icon: 'M19 21V5a2 2 0 00-2-2H7a2 2 0 00-2 2v16m14 0h2m-2 0h-5m-9 0H3m2 0h5M9 7h1m-1 4h1m4-4h1m-1 4h1m-5 10v-5a1 1 0 011-1h2a1 1 0 011 1v5m-4 0h4' // Building/office icon
 		},
 		{
+			href: resolve('/forge-instances'),
+			label: 'Forge Instances',
+			icon: 'M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2m-2-4h.01M17 16h.01' // Server rack icon
+		},
+		{
 			href: resolve('/pools'),
 			label: 'Pools',
 			icon: 'M19 11H5m14 0a2 2 0 012 2v6a2 2 0 01-2 2H5a2 2 0 01-2-2v-6a2 2 0 012-2m14 0V9a2 2 0 00-2-2M5 11V9a2 2 0 012-2m0 0V5a2 2 0 012-2h6a2 2 0 012 2v2M7 7h10' // Server/stack icon
@@ -94,9 +101,19 @@
 			icon: 'M10 20l4-16m4 4l4 4-4 4M6 16l-4-4 4-4' // Code/script icon
 		},
 		{
+			href: resolve('/proxies'),
+			label: 'Proxies',
+			icon: 'M8 7h12m0 0l-4-4m4 4l-4 4m0 6H4m0 0l4 4m-4-4l4-4' // Switch-horizontal icon
+		},
+		{
 			href: resolve('/objects'),
 			label: 'Object Storage',
 			icon: 'M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4'
+		},
+		{
+			href: resolve('/logs'),
+			label: 'Logs',
+			icon: 'M4 6h16M4 10h16M4 14h16M4 18h16'
 		}
 	];
 
@@ -227,6 +244,15 @@
 					Logout
 				</button>
 			</div>
+
+			<!-- Version section -->
+			{#if serverVersion}
+				<div class="border-t border-gray-200 dark:border-gray-600 mt-4 pt-4 px-2">
+					<div class="text-xs text-gray-500 dark:text-gray-400">
+						<span class="font-medium">GARM</span> {serverVersion}
+					</div>
+				</div>
+			{/if}
 		</nav>
 
 	</div>
@@ -373,6 +399,15 @@
 								Logout
 							</button>
 						</div>
+
+						<!-- Version section -->
+						{#if serverVersion}
+							<div class="border-t border-gray-200 dark:border-gray-600 mt-4 pt-4 px-2">
+								<div class="text-xs text-gray-500 dark:text-gray-400">
+									<span class="font-medium">GARM</span> {serverVersion}
+								</div>
+							</div>
+						{/if}
 					</nav>
 				</div>
 

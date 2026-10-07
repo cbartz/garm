@@ -26,6 +26,7 @@ import (
 
 	commonParams "github.com/cloudbase/garm-provider-common/params"
 	apiClientEnterprises "github.com/cloudbase/garm/client/enterprises"
+	apiClientForgeInstances "github.com/cloudbase/garm/client/forge_instances"
 	apiClientInstances "github.com/cloudbase/garm/client/instances"
 	apiClientOrgs "github.com/cloudbase/garm/client/organizations"
 	apiClientPools "github.com/cloudbase/garm/client/pools"
@@ -49,12 +50,15 @@ var (
 	poolRepository             string
 	poolOrganization           string
 	poolEnterprise             string
+	poolForgeInstance          string
 	poolExtraSpecsFile         string
 	poolExtraSpecs             string
 	poolAll                    bool
 	poolGitHubRunnerGroup      string
 	priority                   uint
 	poolTemplateNameOrID       string
+	poolProxyNameOrID          string
+	poolClearProxy             bool
 	poolEnableShell            bool
 )
 
@@ -131,6 +135,14 @@ Example:
 				listEnterprisePoolsReq := apiClientEnterprises.NewListEnterprisePoolsParams()
 				listEnterprisePoolsReq.EnterpriseID = poolEnterprise
 				response, err = apiCli.Enterprises.ListEnterprisePools(listEnterprisePoolsReq, authToken)
+			} else if cmd.Flags().Changed("forge-instance") {
+				poolForgeInstance, err = resolveForgeInstance(poolForgeInstance)
+				if err != nil {
+					return err
+				}
+				listFIPoolsReq := apiClientForgeInstances.NewListForgeInstancePoolsParams()
+				listFIPoolsReq.ForgeInstanceID = poolForgeInstance
+				response, err = apiCli.ForgeInstances.ListForgeInstancePools(listFIPoolsReq, authToken)
 			} else {
 				listPoolsReq := apiClientPools.NewListPoolsParams()
 				response, err = apiCli.Pools.ListPools(listPoolsReq, authToken)
@@ -269,6 +281,14 @@ var poolAddCmd = &cobra.Command{
 			newPoolParams.TemplateID = &tmplID
 		}
 
+		if cmd.Flags().Changed("proxy") && poolProxyNameOrID != "" {
+			proxyID, err := resolveProxyAsUint(poolProxyNameOrID)
+			if err != nil {
+				return err
+			}
+			newPoolParams.ProxyID = &proxyID
+		}
+
 		var response poolPayloadGetter
 		if cmd.Flags().Changed("repo") {
 			poolRepository, err = resolveRepository(poolRepository, endpointName)
@@ -297,6 +317,15 @@ var poolAddCmd = &cobra.Command{
 			newEnterprisePoolReq.EnterpriseID = poolEnterprise
 			newEnterprisePoolReq.Body = newPoolParams
 			response, err = apiCli.Enterprises.CreateEnterprisePool(newEnterprisePoolReq, authToken)
+		} else if cmd.Flags().Changed("forge-instance") {
+			poolForgeInstance, err = resolveForgeInstance(poolForgeInstance)
+			if err != nil {
+				return err
+			}
+			newFIPoolReq := apiClientForgeInstances.NewCreateForgeInstancePoolParams()
+			newFIPoolReq.ForgeInstanceID = poolForgeInstance
+			newFIPoolReq.Body = newPoolParams
+			response, err = apiCli.ForgeInstances.CreateForgeInstancePool(newFIPoolReq, authToken)
 		} else {
 			cmd.Help() //nolint
 			os.Exit(0)
@@ -343,6 +372,17 @@ explicitly remove them using the runner delete command.
 				return fmt.Errorf("failed to resolve template")
 			}
 			poolUpdateParams.TemplateID = &tmplID
+		}
+
+		if cmd.Flags().Changed("proxy") && poolProxyNameOrID != "" {
+			proxyID, err := resolveProxyAsUint(poolProxyNameOrID)
+			if err != nil {
+				return err
+			}
+			poolUpdateParams.ProxyID = &proxyID
+		} else if poolClearProxy {
+			var noProxy uint
+			poolUpdateParams.ProxyID = &noProxy
 		}
 
 		if cmd.Flags().Changed("image") {
@@ -552,12 +592,13 @@ func init() {
 	poolListCmd.Flags().StringVarP(&poolRepository, "repo", "r", "", "List all pools within this repository.")
 	poolListCmd.Flags().StringVarP(&poolOrganization, "org", "o", "", "List all pools within this organization.")
 	poolListCmd.Flags().StringVarP(&poolEnterprise, "enterprise", "e", "", "List all pools within this enterprise.")
+	poolListCmd.Flags().StringVarP(&poolForgeInstance, "forge-instance", "f", "", "List all pools within this forge instance.")
 	poolListCmd.Flags().BoolVarP(&poolAll, "all", "a", true, "List all pools, regardless of org or repo.")
 	poolListCmd.Flags().BoolVarP(&long, "long", "l", false, "Include additional info.")
 	poolListCmd.Flags().StringVar(&endpointName, "endpoint", "", "When using the name of an entity, the endpoint must be specified when multiple entities with the same name exist.")
 
-	poolListCmd.Flags().MarkDeprecated("all", "all pools are listed by default in the absence of --repo, --org or --enterprise.")
-	poolListCmd.MarkFlagsMutuallyExclusive("repo", "org", "enterprise", "all")
+	poolListCmd.Flags().MarkDeprecated("all", "all pools are listed by default in the absence of --repo, --org, --enterprise or --forge-instance.")
+	poolListCmd.MarkFlagsMutuallyExclusive("repo", "org", "enterprise", "forge-instance", "all")
 
 	poolUpdateCmd.Flags().StringVar(&poolImage, "image", "", "The provider-specific image name to use for runners in this pool.")
 	poolUpdateCmd.Flags().UintVar(&priority, "priority", 0, "When multiple pools match the same labels, priority dictates the order by which they are returned, in descending order.")
@@ -576,6 +617,9 @@ func init() {
 	poolUpdateCmd.Flags().BoolVar(&poolEnableShell, "enable-shell", false, "Enable shell access for runners in this pool.")
 	poolUpdateCmd.MarkFlagsMutuallyExclusive("extra-specs-file", "extra-specs")
 	poolUpdateCmd.Flags().StringVar(&poolTemplateNameOrID, "runner-install-template", "", "The runner install template name or ID to use for this pool.")
+	poolUpdateCmd.Flags().StringVar(&poolProxyNameOrID, "proxy", "", "The proxy name or ID runners in this pool will use.")
+	poolUpdateCmd.Flags().BoolVar(&poolClearProxy, "clear-proxy", false, "Remove the proxy from this pool.")
+	poolUpdateCmd.MarkFlagsMutuallyExclusive("proxy", "clear-proxy")
 
 	poolAddCmd.Flags().StringVar(&poolProvider, "provider-name", "", "The name of the provider where runners will be created.")
 	poolAddCmd.Flags().UintVar(&priority, "priority", 0, "When multiple pools match the same labels, priority dictates the order by which they are returned, in descending order.")
@@ -594,6 +638,7 @@ func init() {
 	poolAddCmd.Flags().BoolVar(&poolEnabled, "enabled", false, "Enable this pool.")
 	poolAddCmd.Flags().BoolVar(&poolEnableShell, "enable-shell", false, "Enable shell access for runners in this pool.")
 	poolAddCmd.Flags().StringVar(&poolTemplateNameOrID, "runner-install-template", "", "The runner install template name or ID to use for this pool.")
+	poolAddCmd.Flags().StringVar(&poolProxyNameOrID, "proxy", "", "The proxy name or ID runners in this pool will use.")
 	poolAddCmd.Flags().StringVar(&endpointName, "endpoint", "", "When using the name of an entity, the endpoint must be specified when multiple entities with the same name exist.")
 
 	poolAddCmd.MarkFlagRequired("provider-name") //nolint
@@ -604,7 +649,8 @@ func init() {
 	poolAddCmd.Flags().StringVarP(&poolRepository, "repo", "r", "", "Add the new pool within this repository.")
 	poolAddCmd.Flags().StringVarP(&poolOrganization, "org", "o", "", "Add the new pool within this organization.")
 	poolAddCmd.Flags().StringVarP(&poolEnterprise, "enterprise", "e", "", "Add the new pool within this enterprise.")
-	poolAddCmd.MarkFlagsMutuallyExclusive("repo", "org", "enterprise")
+	poolAddCmd.Flags().StringVarP(&poolForgeInstance, "forge-instance", "f", "", "Add the new pool within this forge instance.")
+	poolAddCmd.MarkFlagsMutuallyExclusive("repo", "org", "enterprise", "forge-instance")
 	poolAddCmd.MarkFlagsMutuallyExclusive("extra-specs-file", "extra-specs")
 
 	poolRunnerListCmd.Flags().BoolVar(&poolRunnerOutdated, "outdated", false, "List only runners with a generation older than the pool.")
@@ -690,6 +736,9 @@ func formatPools(pools []params.Pool) {
 		case pool.EnterpriseID != "" && pool.EnterpriseName != "":
 			belongsTo = pool.EnterpriseName
 			level = entityTypeEnterprise
+		case pool.ForgeInstanceID != "":
+			belongsTo = pool.Endpoint.Name
+			level = "forge-instance"
 		}
 		row := table.Row{pool.ID, pool.Image, pool.Flavor, strings.Join(tags, " "), belongsTo, pool.Endpoint.Name, pool.Endpoint.EndpointType, pool.Enabled}
 		if long {
@@ -729,6 +778,9 @@ func formatOnePool(pool params.Pool) {
 	case pool.EnterpriseID != "" && pool.EnterpriseName != "":
 		belongsTo = pool.EnterpriseName
 		level = entityTypeEnterprise
+	case pool.ForgeInstanceID != "":
+		belongsTo = pool.Endpoint.Name
+		level = "forge-instance"
 	}
 
 	t.AppendHeader(header)
@@ -748,6 +800,9 @@ func formatOnePool(pool params.Pool) {
 	t.AppendRow(table.Row{"Belongs to", belongsTo})
 	t.AppendRow(table.Row{"Level", level})
 	t.AppendRow(table.Row{"Template", fmt.Sprintf("%s (ID: %d)", pool.TemplateName, pool.TemplateID)})
+	if pool.ProxyID != 0 {
+		t.AppendRow(table.Row{"Proxy", fmt.Sprintf("%s (ID: %d)", pool.ProxyName, pool.ProxyID)})
+	}
 	t.AppendRow(table.Row{"Enabled", pool.Enabled})
 	t.AppendRow(table.Row{"Runner Prefix", pool.GetRunnerPrefix()})
 	t.AppendRow(table.Row{"Extra specs", string(pool.ExtraSpecs)})

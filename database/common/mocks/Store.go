@@ -466,6 +466,67 @@ func (_c *Store_CreateFileObject_Call) RunAndReturn(run func(context.Context, pa
 	return _c
 }
 
+// CreateForgeInstance provides a mock function with given fields: ctx, endpointName, credentials, webhookSecret, poolBalancerType, agentMode
+func (_m *Store) CreateForgeInstance(ctx context.Context, endpointName string, credentials params.ForgeCredentials, webhookSecret string, poolBalancerType params.PoolBalancerType, agentMode bool) (params.ForgeInstance, error) {
+	ret := _m.Called(ctx, endpointName, credentials, webhookSecret, poolBalancerType, agentMode)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateForgeInstance")
+	}
+
+	var r0 params.ForgeInstance
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, string, params.ForgeCredentials, string, params.PoolBalancerType, bool) (params.ForgeInstance, error)); ok {
+		return rf(ctx, endpointName, credentials, webhookSecret, poolBalancerType, agentMode)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, string, params.ForgeCredentials, string, params.PoolBalancerType, bool) params.ForgeInstance); ok {
+		r0 = rf(ctx, endpointName, credentials, webhookSecret, poolBalancerType, agentMode)
+	} else {
+		r0 = ret.Get(0).(params.ForgeInstance)
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, string, params.ForgeCredentials, string, params.PoolBalancerType, bool) error); ok {
+		r1 = rf(ctx, endpointName, credentials, webhookSecret, poolBalancerType, agentMode)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// Store_CreateForgeInstance_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateForgeInstance'
+type Store_CreateForgeInstance_Call struct {
+	*mock.Call
+}
+
+// CreateForgeInstance is a helper method to define mock.On call
+//   - ctx context.Context
+//   - endpointName string
+//   - credentials params.ForgeCredentials
+//   - webhookSecret string
+//   - poolBalancerType params.PoolBalancerType
+//   - agentMode bool
+func (_e *Store_Expecter) CreateForgeInstance(ctx interface{}, endpointName interface{}, credentials interface{}, webhookSecret interface{}, poolBalancerType interface{}, agentMode interface{}) *Store_CreateForgeInstance_Call {
+	return &Store_CreateForgeInstance_Call{Call: _e.mock.On("CreateForgeInstance", ctx, endpointName, credentials, webhookSecret, poolBalancerType, agentMode)}
+}
+
+func (_c *Store_CreateForgeInstance_Call) Run(run func(ctx context.Context, endpointName string, credentials params.ForgeCredentials, webhookSecret string, poolBalancerType params.PoolBalancerType, agentMode bool)) *Store_CreateForgeInstance_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(string), args[2].(params.ForgeCredentials), args[3].(string), args[4].(params.PoolBalancerType), args[5].(bool))
+	})
+	return _c
+}
+
+func (_c *Store_CreateForgeInstance_Call) Return(_a0 params.ForgeInstance, _a1 error) *Store_CreateForgeInstance_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *Store_CreateForgeInstance_Call) RunAndReturn(run func(context.Context, string, params.ForgeCredentials, string, params.PoolBalancerType, bool) (params.ForgeInstance, error)) *Store_CreateForgeInstance_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // CreateGiteaCredentials provides a mock function with given fields: ctx, param
 func (_m *Store) CreateGiteaCredentials(ctx context.Context, param params.CreateGiteaCredentialsParams) (params.ForgeCredentials, error) {
 	ret := _m.Called(ctx, param)
@@ -866,6 +927,63 @@ func (_c *Store_CreateOrganization_Call) Return(org params.Organization, err err
 }
 
 func (_c *Store_CreateOrganization_Call) RunAndReturn(run func(context.Context, string, params.ForgeCredentials, string, params.PoolBalancerType, bool) (params.Organization, error)) *Store_CreateOrganization_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// CreateProxy provides a mock function with given fields: ctx, param
+func (_m *Store) CreateProxy(ctx context.Context, param params.CreateProxyParams) (params.Proxy, error) {
+	ret := _m.Called(ctx, param)
+
+	if len(ret) == 0 {
+		panic("no return value specified for CreateProxy")
+	}
+
+	var r0 params.Proxy
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, params.CreateProxyParams) (params.Proxy, error)); ok {
+		return rf(ctx, param)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, params.CreateProxyParams) params.Proxy); ok {
+		r0 = rf(ctx, param)
+	} else {
+		r0 = ret.Get(0).(params.Proxy)
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, params.CreateProxyParams) error); ok {
+		r1 = rf(ctx, param)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// Store_CreateProxy_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'CreateProxy'
+type Store_CreateProxy_Call struct {
+	*mock.Call
+}
+
+// CreateProxy is a helper method to define mock.On call
+//   - ctx context.Context
+//   - param params.CreateProxyParams
+func (_e *Store_Expecter) CreateProxy(ctx interface{}, param interface{}) *Store_CreateProxy_Call {
+	return &Store_CreateProxy_Call{Call: _e.mock.On("CreateProxy", ctx, param)}
+}
+
+func (_c *Store_CreateProxy_Call) Run(run func(ctx context.Context, param params.CreateProxyParams)) *Store_CreateProxy_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(params.CreateProxyParams))
+	})
+	return _c
+}
+
+func (_c *Store_CreateProxy_Call) Return(proxy params.Proxy, err error) *Store_CreateProxy_Call {
+	_c.Call.Return(proxy, err)
+	return _c
+}
+
+func (_c *Store_CreateProxy_Call) RunAndReturn(run func(context.Context, params.CreateProxyParams) (params.Proxy, error)) *Store_CreateProxy_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1299,6 +1417,53 @@ func (_c *Store_DeleteFileObjectsByTags_Call) Return(_a0 int64, _a1 error) *Stor
 }
 
 func (_c *Store_DeleteFileObjectsByTags_Call) RunAndReturn(run func(context.Context, []string) (int64, error)) *Store_DeleteFileObjectsByTags_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteForgeInstance provides a mock function with given fields: ctx, forgeInstanceID
+func (_m *Store) DeleteForgeInstance(ctx context.Context, forgeInstanceID string) error {
+	ret := _m.Called(ctx, forgeInstanceID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteForgeInstance")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, string) error); ok {
+		r0 = rf(ctx, forgeInstanceID)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// Store_DeleteForgeInstance_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteForgeInstance'
+type Store_DeleteForgeInstance_Call struct {
+	*mock.Call
+}
+
+// DeleteForgeInstance is a helper method to define mock.On call
+//   - ctx context.Context
+//   - forgeInstanceID string
+func (_e *Store_Expecter) DeleteForgeInstance(ctx interface{}, forgeInstanceID interface{}) *Store_DeleteForgeInstance_Call {
+	return &Store_DeleteForgeInstance_Call{Call: _e.mock.On("DeleteForgeInstance", ctx, forgeInstanceID)}
+}
+
+func (_c *Store_DeleteForgeInstance_Call) Run(run func(ctx context.Context, forgeInstanceID string)) *Store_DeleteForgeInstance_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(string))
+	})
+	return _c
+}
+
+func (_c *Store_DeleteForgeInstance_Call) Return(_a0 error) *Store_DeleteForgeInstance_Call {
+	_c.Call.Return(_a0)
+	return _c
+}
+
+func (_c *Store_DeleteForgeInstance_Call) RunAndReturn(run func(context.Context, string) error) *Store_DeleteForgeInstance_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -1770,6 +1935,53 @@ func (_c *Store_DeletePoolByID_Call) Return(_a0 error) *Store_DeletePoolByID_Cal
 }
 
 func (_c *Store_DeletePoolByID_Call) RunAndReturn(run func(context.Context, string) error) *Store_DeletePoolByID_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// DeleteProxy provides a mock function with given fields: ctx, id
+func (_m *Store) DeleteProxy(ctx context.Context, id uint) error {
+	ret := _m.Called(ctx, id)
+
+	if len(ret) == 0 {
+		panic("no return value specified for DeleteProxy")
+	}
+
+	var r0 error
+	if rf, ok := ret.Get(0).(func(context.Context, uint) error); ok {
+		r0 = rf(ctx, id)
+	} else {
+		r0 = ret.Error(0)
+	}
+
+	return r0
+}
+
+// Store_DeleteProxy_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'DeleteProxy'
+type Store_DeleteProxy_Call struct {
+	*mock.Call
+}
+
+// DeleteProxy is a helper method to define mock.On call
+//   - ctx context.Context
+//   - id uint
+func (_e *Store_Expecter) DeleteProxy(ctx interface{}, id interface{}) *Store_DeleteProxy_Call {
+	return &Store_DeleteProxy_Call{Call: _e.mock.On("DeleteProxy", ctx, id)}
+}
+
+func (_c *Store_DeleteProxy_Call) Run(run func(ctx context.Context, id uint)) *Store_DeleteProxy_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(uint))
+	})
+	return _c
+}
+
+func (_c *Store_DeleteProxy_Call) Return(err error) *Store_DeleteProxy_Call {
+	_c.Call.Return(err)
+	return _c
+}
+
+func (_c *Store_DeleteProxy_Call) RunAndReturn(run func(context.Context, uint) error) *Store_DeleteProxy_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -2374,6 +2586,120 @@ func (_c *Store_GetForgeEntity_Call) Return(_a0 params.ForgeEntity, _a1 error) *
 }
 
 func (_c *Store_GetForgeEntity_Call) RunAndReturn(run func(context.Context, params.ForgeEntityType, string) (params.ForgeEntity, error)) *Store_GetForgeEntity_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetForgeInstance provides a mock function with given fields: ctx, endpointName
+func (_m *Store) GetForgeInstance(ctx context.Context, endpointName string) (params.ForgeInstance, error) {
+	ret := _m.Called(ctx, endpointName)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetForgeInstance")
+	}
+
+	var r0 params.ForgeInstance
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, string) (params.ForgeInstance, error)); ok {
+		return rf(ctx, endpointName)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, string) params.ForgeInstance); ok {
+		r0 = rf(ctx, endpointName)
+	} else {
+		r0 = ret.Get(0).(params.ForgeInstance)
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = rf(ctx, endpointName)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// Store_GetForgeInstance_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetForgeInstance'
+type Store_GetForgeInstance_Call struct {
+	*mock.Call
+}
+
+// GetForgeInstance is a helper method to define mock.On call
+//   - ctx context.Context
+//   - endpointName string
+func (_e *Store_Expecter) GetForgeInstance(ctx interface{}, endpointName interface{}) *Store_GetForgeInstance_Call {
+	return &Store_GetForgeInstance_Call{Call: _e.mock.On("GetForgeInstance", ctx, endpointName)}
+}
+
+func (_c *Store_GetForgeInstance_Call) Run(run func(ctx context.Context, endpointName string)) *Store_GetForgeInstance_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(string))
+	})
+	return _c
+}
+
+func (_c *Store_GetForgeInstance_Call) Return(_a0 params.ForgeInstance, _a1 error) *Store_GetForgeInstance_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *Store_GetForgeInstance_Call) RunAndReturn(run func(context.Context, string) (params.ForgeInstance, error)) *Store_GetForgeInstance_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetForgeInstanceByID provides a mock function with given fields: ctx, forgeInstanceID
+func (_m *Store) GetForgeInstanceByID(ctx context.Context, forgeInstanceID string) (params.ForgeInstance, error) {
+	ret := _m.Called(ctx, forgeInstanceID)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetForgeInstanceByID")
+	}
+
+	var r0 params.ForgeInstance
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, string) (params.ForgeInstance, error)); ok {
+		return rf(ctx, forgeInstanceID)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, string) params.ForgeInstance); ok {
+		r0 = rf(ctx, forgeInstanceID)
+	} else {
+		r0 = ret.Get(0).(params.ForgeInstance)
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = rf(ctx, forgeInstanceID)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// Store_GetForgeInstanceByID_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetForgeInstanceByID'
+type Store_GetForgeInstanceByID_Call struct {
+	*mock.Call
+}
+
+// GetForgeInstanceByID is a helper method to define mock.On call
+//   - ctx context.Context
+//   - forgeInstanceID string
+func (_e *Store_Expecter) GetForgeInstanceByID(ctx interface{}, forgeInstanceID interface{}) *Store_GetForgeInstanceByID_Call {
+	return &Store_GetForgeInstanceByID_Call{Call: _e.mock.On("GetForgeInstanceByID", ctx, forgeInstanceID)}
+}
+
+func (_c *Store_GetForgeInstanceByID_Call) Run(run func(ctx context.Context, forgeInstanceID string)) *Store_GetForgeInstanceByID_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(string))
+	})
+	return _c
+}
+
+func (_c *Store_GetForgeInstanceByID_Call) Return(_a0 params.ForgeInstance, _a1 error) *Store_GetForgeInstanceByID_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *Store_GetForgeInstanceByID_Call) RunAndReturn(run func(context.Context, string) (params.ForgeInstance, error)) *Store_GetForgeInstanceByID_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -3006,6 +3332,120 @@ func (_c *Store_GetPoolByID_Call) Return(_a0 params.Pool, _a1 error) *Store_GetP
 }
 
 func (_c *Store_GetPoolByID_Call) RunAndReturn(run func(context.Context, string) (params.Pool, error)) *Store_GetPoolByID_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetProxy provides a mock function with given fields: ctx, id
+func (_m *Store) GetProxy(ctx context.Context, id uint) (params.Proxy, error) {
+	ret := _m.Called(ctx, id)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetProxy")
+	}
+
+	var r0 params.Proxy
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, uint) (params.Proxy, error)); ok {
+		return rf(ctx, id)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, uint) params.Proxy); ok {
+		r0 = rf(ctx, id)
+	} else {
+		r0 = ret.Get(0).(params.Proxy)
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, uint) error); ok {
+		r1 = rf(ctx, id)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// Store_GetProxy_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetProxy'
+type Store_GetProxy_Call struct {
+	*mock.Call
+}
+
+// GetProxy is a helper method to define mock.On call
+//   - ctx context.Context
+//   - id uint
+func (_e *Store_Expecter) GetProxy(ctx interface{}, id interface{}) *Store_GetProxy_Call {
+	return &Store_GetProxy_Call{Call: _e.mock.On("GetProxy", ctx, id)}
+}
+
+func (_c *Store_GetProxy_Call) Run(run func(ctx context.Context, id uint)) *Store_GetProxy_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(uint))
+	})
+	return _c
+}
+
+func (_c *Store_GetProxy_Call) Return(_a0 params.Proxy, _a1 error) *Store_GetProxy_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *Store_GetProxy_Call) RunAndReturn(run func(context.Context, uint) (params.Proxy, error)) *Store_GetProxy_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// GetProxyByName provides a mock function with given fields: ctx, name
+func (_m *Store) GetProxyByName(ctx context.Context, name string) (params.Proxy, error) {
+	ret := _m.Called(ctx, name)
+
+	if len(ret) == 0 {
+		panic("no return value specified for GetProxyByName")
+	}
+
+	var r0 params.Proxy
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, string) (params.Proxy, error)); ok {
+		return rf(ctx, name)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, string) params.Proxy); ok {
+		r0 = rf(ctx, name)
+	} else {
+		r0 = ret.Get(0).(params.Proxy)
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, string) error); ok {
+		r1 = rf(ctx, name)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// Store_GetProxyByName_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'GetProxyByName'
+type Store_GetProxyByName_Call struct {
+	*mock.Call
+}
+
+// GetProxyByName is a helper method to define mock.On call
+//   - ctx context.Context
+//   - name string
+func (_e *Store_Expecter) GetProxyByName(ctx interface{}, name interface{}) *Store_GetProxyByName_Call {
+	return &Store_GetProxyByName_Call{Call: _e.mock.On("GetProxyByName", ctx, name)}
+}
+
+func (_c *Store_GetProxyByName_Call) Run(run func(ctx context.Context, name string)) *Store_GetProxyByName_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(string))
+	})
+	return _c
+}
+
+func (_c *Store_GetProxyByName_Call) Return(_a0 params.Proxy, _a1 error) *Store_GetProxyByName_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *Store_GetProxyByName_Call) RunAndReturn(run func(context.Context, string) (params.Proxy, error)) *Store_GetProxyByName_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -4154,6 +4594,65 @@ func (_c *Store_ListFileObjects_Call) RunAndReturn(run func(context.Context, uin
 	return _c
 }
 
+// ListForgeInstances provides a mock function with given fields: ctx, filter
+func (_m *Store) ListForgeInstances(ctx context.Context, filter params.ForgeInstanceFilter) ([]params.ForgeInstance, error) {
+	ret := _m.Called(ctx, filter)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListForgeInstances")
+	}
+
+	var r0 []params.ForgeInstance
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, params.ForgeInstanceFilter) ([]params.ForgeInstance, error)); ok {
+		return rf(ctx, filter)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, params.ForgeInstanceFilter) []params.ForgeInstance); ok {
+		r0 = rf(ctx, filter)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]params.ForgeInstance)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, params.ForgeInstanceFilter) error); ok {
+		r1 = rf(ctx, filter)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// Store_ListForgeInstances_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListForgeInstances'
+type Store_ListForgeInstances_Call struct {
+	*mock.Call
+}
+
+// ListForgeInstances is a helper method to define mock.On call
+//   - ctx context.Context
+//   - filter params.ForgeInstanceFilter
+func (_e *Store_Expecter) ListForgeInstances(ctx interface{}, filter interface{}) *Store_ListForgeInstances_Call {
+	return &Store_ListForgeInstances_Call{Call: _e.mock.On("ListForgeInstances", ctx, filter)}
+}
+
+func (_c *Store_ListForgeInstances_Call) Run(run func(ctx context.Context, filter params.ForgeInstanceFilter)) *Store_ListForgeInstances_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(params.ForgeInstanceFilter))
+	})
+	return _c
+}
+
+func (_c *Store_ListForgeInstances_Call) Return(_a0 []params.ForgeInstance, _a1 error) *Store_ListForgeInstances_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *Store_ListForgeInstances_Call) RunAndReturn(run func(context.Context, params.ForgeInstanceFilter) ([]params.ForgeInstance, error)) *Store_ListForgeInstances_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
 // ListGiteaCredentials provides a mock function with given fields: ctx
 func (_m *Store) ListGiteaCredentials(ctx context.Context) ([]params.ForgeCredentials, error) {
 	ret := _m.Called(ctx)
@@ -4560,6 +5059,64 @@ func (_c *Store_ListPoolInstances_Call) Return(_a0 []params.Instance, _a1 error)
 }
 
 func (_c *Store_ListPoolInstances_Call) RunAndReturn(run func(context.Context, string, bool) ([]params.Instance, error)) *Store_ListPoolInstances_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// ListProxies provides a mock function with given fields: ctx
+func (_m *Store) ListProxies(ctx context.Context) ([]params.Proxy, error) {
+	ret := _m.Called(ctx)
+
+	if len(ret) == 0 {
+		panic("no return value specified for ListProxies")
+	}
+
+	var r0 []params.Proxy
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context) ([]params.Proxy, error)); ok {
+		return rf(ctx)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context) []params.Proxy); ok {
+		r0 = rf(ctx)
+	} else {
+		if ret.Get(0) != nil {
+			r0 = ret.Get(0).([]params.Proxy)
+		}
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context) error); ok {
+		r1 = rf(ctx)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// Store_ListProxies_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'ListProxies'
+type Store_ListProxies_Call struct {
+	*mock.Call
+}
+
+// ListProxies is a helper method to define mock.On call
+//   - ctx context.Context
+func (_e *Store_Expecter) ListProxies(ctx interface{}) *Store_ListProxies_Call {
+	return &Store_ListProxies_Call{Call: _e.mock.On("ListProxies", ctx)}
+}
+
+func (_c *Store_ListProxies_Call) Run(run func(ctx context.Context)) *Store_ListProxies_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context))
+	})
+	return _c
+}
+
+func (_c *Store_ListProxies_Call) Return(_a0 []params.Proxy, _a1 error) *Store_ListProxies_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *Store_ListProxies_Call) RunAndReturn(run func(context.Context) ([]params.Proxy, error)) *Store_ListProxies_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -5159,17 +5716,17 @@ func (_c *Store_UnlockJob_Call) RunAndReturn(run func(context.Context, int64, st
 	return _c
 }
 
-// UpdateCachedGARMAgentRelease provides a mock function with given fields: releaseData, fetchedAt
-func (_m *Store) UpdateCachedGARMAgentRelease(releaseData []byte, fetchedAt time.Time) error {
-	ret := _m.Called(releaseData, fetchedAt)
+// UpdateCachedGARMAgentReleases provides a mock function with given fields: index, fetchedAt
+func (_m *Store) UpdateCachedGARMAgentReleases(index []byte, fetchedAt time.Time) error {
+	ret := _m.Called(index, fetchedAt)
 
 	if len(ret) == 0 {
-		panic("no return value specified for UpdateCachedGARMAgentRelease")
+		panic("no return value specified for UpdateCachedGARMAgentReleases")
 	}
 
 	var r0 error
 	if rf, ok := ret.Get(0).(func([]byte, time.Time) error); ok {
-		r0 = rf(releaseData, fetchedAt)
+		r0 = rf(index, fetchedAt)
 	} else {
 		r0 = ret.Error(0)
 	}
@@ -5177,31 +5734,31 @@ func (_m *Store) UpdateCachedGARMAgentRelease(releaseData []byte, fetchedAt time
 	return r0
 }
 
-// Store_UpdateCachedGARMAgentRelease_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateCachedGARMAgentRelease'
-type Store_UpdateCachedGARMAgentRelease_Call struct {
+// Store_UpdateCachedGARMAgentReleases_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateCachedGARMAgentReleases'
+type Store_UpdateCachedGARMAgentReleases_Call struct {
 	*mock.Call
 }
 
-// UpdateCachedGARMAgentRelease is a helper method to define mock.On call
-//   - releaseData []byte
+// UpdateCachedGARMAgentReleases is a helper method to define mock.On call
+//   - index []byte
 //   - fetchedAt time.Time
-func (_e *Store_Expecter) UpdateCachedGARMAgentRelease(releaseData interface{}, fetchedAt interface{}) *Store_UpdateCachedGARMAgentRelease_Call {
-	return &Store_UpdateCachedGARMAgentRelease_Call{Call: _e.mock.On("UpdateCachedGARMAgentRelease", releaseData, fetchedAt)}
+func (_e *Store_Expecter) UpdateCachedGARMAgentReleases(index interface{}, fetchedAt interface{}) *Store_UpdateCachedGARMAgentReleases_Call {
+	return &Store_UpdateCachedGARMAgentReleases_Call{Call: _e.mock.On("UpdateCachedGARMAgentReleases", index, fetchedAt)}
 }
 
-func (_c *Store_UpdateCachedGARMAgentRelease_Call) Run(run func(releaseData []byte, fetchedAt time.Time)) *Store_UpdateCachedGARMAgentRelease_Call {
+func (_c *Store_UpdateCachedGARMAgentReleases_Call) Run(run func(index []byte, fetchedAt time.Time)) *Store_UpdateCachedGARMAgentReleases_Call {
 	_c.Call.Run(func(args mock.Arguments) {
 		run(args[0].([]byte), args[1].(time.Time))
 	})
 	return _c
 }
 
-func (_c *Store_UpdateCachedGARMAgentRelease_Call) Return(_a0 error) *Store_UpdateCachedGARMAgentRelease_Call {
+func (_c *Store_UpdateCachedGARMAgentReleases_Call) Return(_a0 error) *Store_UpdateCachedGARMAgentReleases_Call {
 	_c.Call.Return(_a0)
 	return _c
 }
 
-func (_c *Store_UpdateCachedGARMAgentRelease_Call) RunAndReturn(run func([]byte, time.Time) error) *Store_UpdateCachedGARMAgentRelease_Call {
+func (_c *Store_UpdateCachedGARMAgentReleases_Call) RunAndReturn(run func([]byte, time.Time) error) *Store_UpdateCachedGARMAgentReleases_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -5493,6 +6050,64 @@ func (_c *Store_UpdateFileObject_Call) Return(_a0 params.FileObject, _a1 error) 
 }
 
 func (_c *Store_UpdateFileObject_Call) RunAndReturn(run func(context.Context, uint, params.UpdateFileObjectParams) (params.FileObject, error)) *Store_UpdateFileObject_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateForgeInstance provides a mock function with given fields: ctx, forgeInstanceID, param
+func (_m *Store) UpdateForgeInstance(ctx context.Context, forgeInstanceID string, param params.UpdateEntityParams) (params.ForgeInstance, error) {
+	ret := _m.Called(ctx, forgeInstanceID, param)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateForgeInstance")
+	}
+
+	var r0 params.ForgeInstance
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, string, params.UpdateEntityParams) (params.ForgeInstance, error)); ok {
+		return rf(ctx, forgeInstanceID, param)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, string, params.UpdateEntityParams) params.ForgeInstance); ok {
+		r0 = rf(ctx, forgeInstanceID, param)
+	} else {
+		r0 = ret.Get(0).(params.ForgeInstance)
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, string, params.UpdateEntityParams) error); ok {
+		r1 = rf(ctx, forgeInstanceID, param)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// Store_UpdateForgeInstance_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateForgeInstance'
+type Store_UpdateForgeInstance_Call struct {
+	*mock.Call
+}
+
+// UpdateForgeInstance is a helper method to define mock.On call
+//   - ctx context.Context
+//   - forgeInstanceID string
+//   - param params.UpdateEntityParams
+func (_e *Store_Expecter) UpdateForgeInstance(ctx interface{}, forgeInstanceID interface{}, param interface{}) *Store_UpdateForgeInstance_Call {
+	return &Store_UpdateForgeInstance_Call{Call: _e.mock.On("UpdateForgeInstance", ctx, forgeInstanceID, param)}
+}
+
+func (_c *Store_UpdateForgeInstance_Call) Run(run func(ctx context.Context, forgeInstanceID string, param params.UpdateEntityParams)) *Store_UpdateForgeInstance_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(string), args[2].(params.UpdateEntityParams))
+	})
+	return _c
+}
+
+func (_c *Store_UpdateForgeInstance_Call) Return(_a0 params.ForgeInstance, _a1 error) *Store_UpdateForgeInstance_Call {
+	_c.Call.Return(_a0, _a1)
+	return _c
+}
+
+func (_c *Store_UpdateForgeInstance_Call) RunAndReturn(run func(context.Context, string, params.UpdateEntityParams) (params.ForgeInstance, error)) *Store_UpdateForgeInstance_Call {
 	_c.Call.Return(run)
 	return _c
 }
@@ -5841,6 +6456,64 @@ func (_c *Store_UpdateOrganization_Call) Return(_a0 params.Organization, _a1 err
 }
 
 func (_c *Store_UpdateOrganization_Call) RunAndReturn(run func(context.Context, string, params.UpdateEntityParams) (params.Organization, error)) *Store_UpdateOrganization_Call {
+	_c.Call.Return(run)
+	return _c
+}
+
+// UpdateProxy provides a mock function with given fields: ctx, id, param
+func (_m *Store) UpdateProxy(ctx context.Context, id uint, param params.UpdateProxyParams) (params.Proxy, error) {
+	ret := _m.Called(ctx, id, param)
+
+	if len(ret) == 0 {
+		panic("no return value specified for UpdateProxy")
+	}
+
+	var r0 params.Proxy
+	var r1 error
+	if rf, ok := ret.Get(0).(func(context.Context, uint, params.UpdateProxyParams) (params.Proxy, error)); ok {
+		return rf(ctx, id, param)
+	}
+	if rf, ok := ret.Get(0).(func(context.Context, uint, params.UpdateProxyParams) params.Proxy); ok {
+		r0 = rf(ctx, id, param)
+	} else {
+		r0 = ret.Get(0).(params.Proxy)
+	}
+
+	if rf, ok := ret.Get(1).(func(context.Context, uint, params.UpdateProxyParams) error); ok {
+		r1 = rf(ctx, id, param)
+	} else {
+		r1 = ret.Error(1)
+	}
+
+	return r0, r1
+}
+
+// Store_UpdateProxy_Call is a *mock.Call that shadows Run/Return methods with type explicit version for method 'UpdateProxy'
+type Store_UpdateProxy_Call struct {
+	*mock.Call
+}
+
+// UpdateProxy is a helper method to define mock.On call
+//   - ctx context.Context
+//   - id uint
+//   - param params.UpdateProxyParams
+func (_e *Store_Expecter) UpdateProxy(ctx interface{}, id interface{}, param interface{}) *Store_UpdateProxy_Call {
+	return &Store_UpdateProxy_Call{Call: _e.mock.On("UpdateProxy", ctx, id, param)}
+}
+
+func (_c *Store_UpdateProxy_Call) Run(run func(ctx context.Context, id uint, param params.UpdateProxyParams)) *Store_UpdateProxy_Call {
+	_c.Call.Run(func(args mock.Arguments) {
+		run(args[0].(context.Context), args[1].(uint), args[2].(params.UpdateProxyParams))
+	})
+	return _c
+}
+
+func (_c *Store_UpdateProxy_Call) Return(proxy params.Proxy, err error) *Store_UpdateProxy_Call {
+	_c.Call.Return(proxy, err)
+	return _c
+}
+
+func (_c *Store_UpdateProxy_Call) RunAndReturn(run func(context.Context, uint, params.UpdateProxyParams) (params.Proxy, error)) *Store_UpdateProxy_Call {
 	_c.Call.Return(run)
 	return _c
 }

@@ -70,6 +70,10 @@
 	}
 
 	function handleShell(instance: Instance) {
+		// Gate on staleness at open time only; once the session is open the
+		// terminal manages its own connection state. Re-evaluating staleness
+		// in the render condition would unmount the shell mid-session.
+		if (isHeartbeatStale(instance)) return;
 		instanceForShell = instance;
 		showShellModal = true;
 	}
@@ -101,7 +105,7 @@
 				`Instance ${instanceToDelete.name} has been deleted successfully.`
 			);
 		} catch (err) {
-			error = extractAPIError(err);
+			toastStore.error('Delete Failed', extractAPIError(err));
 		} finally {
 			showDeleteModal = false;
 			instanceToDelete = null;
@@ -298,18 +302,6 @@
 		showAction={false}
 	/>
 
-	{#if error}
-		<div class="bg-red-50 dark:bg-red-900/50 border border-red-200 dark:border-red-800 rounded-md p-4">
-			<div class="flex">
-				<div class="ml-3">
-					<h3 class="text-sm font-medium text-red-800 dark:text-red-200">Error</h3>
-					<div class="mt-2 text-sm text-red-700 dark:text-red-300">{error}</div>
-				</div>
-			</div>
-		</div>
-	{/if}
-
-
 	<DataTable
 		{columns}
 		data={paginatedInstances}
@@ -336,7 +328,7 @@
 </div>
 
 <!-- Shell Modal -->
-{#if showShellModal && instanceForShell && !isHeartbeatStale(instanceForShell)}
+{#if showShellModal && instanceForShell}
 	<div class="fixed inset-0 bg-black/30 dark:bg-black/50 overflow-hidden h-full w-full z-50">
 		<div class="relative w-full h-full flex items-center justify-center p-4">
 			<ShellTerminal

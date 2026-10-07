@@ -179,6 +179,7 @@ func (w *Worker) consolidateRunnerState() error {
 	}
 	// Client is scoped to the current entity. Only runners in a repo/org/enterprise
 	// will be listed.
+	listedAt := time.Now()
 	runners, err := scaleSetCli.ListAllRunners(w.ctx)
 	if err != nil {
 		return fmt.Errorf("listing runners: %w", err)
@@ -201,7 +202,7 @@ func (w *Worker) consolidateRunnerState() error {
 	g, ctx := errgroup.WithContext(w.ctx)
 	g.Go(func() error {
 		slog.DebugContext(ctx, "consolidating scale set runners", "entity", w.Entity.String(), "runners", runners)
-		if err := w.scaleSetController.ConsolidateRunnerState(byScaleSetID); err != nil {
+		if err := w.scaleSetController.ConsolidateRunnerState(listedAt, byScaleSetID); err != nil {
 			return fmt.Errorf("consolidating runners for scale set: %w", err)
 		}
 		return nil
@@ -238,12 +239,27 @@ func (w *Worker) consolidateRunnerLoop() {
 	ticker := time.NewTicker(common.PoolReapTimeoutInterval)
 	defer ticker.Stop()
 
+	rateLimited := false
 	for {
 		select {
 		case _, ok := <-ticker.C:
 			if !ok {
 				slog.InfoContext(w.ctx, "consolidate ticker closed")
 				return
+			}
+			// Consolidation lists all runners from the forge and fans out
+			// into the scale set workers' reap and cleanup routines which are
+			// all non-critical forge API consumers. Skip while rate limited.
+			if limited, resetAt := cache.EntityRateLimitReached(w.Entity.ID); limited {
+				if !rateLimited {
+					slog.InfoContext(w.ctx, "rate limit reached; pausing runner consolidation until the quota resets", "reset_at", resetAt)
+					rateLimited = true
+				}
+				continue
+			}
+			if rateLimited {
+				slog.InfoContext(w.ctx, "rate limit lifted; resuming runner consolidation")
+				rateLimited = false
 			}
 			if err := w.consolidateRunnerState(); err != nil {
 				w.addStatusEvent(fmt.Sprintf("failed to consolidate runner state: %q", err.Error()), params.EventError)
@@ -261,7 +277,11 @@ func (w *Worker) loop() {
 	defer w.Stop()
 	for {
 		select {
-		case payload := <-w.consumer.Watch():
+		case payload, ok := <-w.consumer.Watch():
+			if !ok {
+				slog.InfoContext(w.ctx, "consumer channel closed")
+				return
+			}
 			slog.DebugContext(w.ctx, "received payload, queuing for processing")
 			select {
 			case w.eventQueue.In() <- payload:

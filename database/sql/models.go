@@ -65,16 +65,25 @@ type ControllerInfo struct {
 	GARMAgentReleasesURL string
 	// SyncGARMAgentTools enables or disables automatic sync of garm-agent tools.
 	SyncGARMAgentTools bool
+	// GARMAgentVersion is the preferred GARM agent version. Empty or "latest" will
+	// default to the latest version available at GARMAgentReleasesURL. A specific version
+	// will cache and download (if SyncGARMAgentTools is true) the specified version.
+	GARMAgentVersion string
 	// MinimumJobAgeBackoff is the minimum time that a job must be in the queue
 	// before GARM will attempt to allocate a runner to service it. This backoff
 	// is useful if you have idle runners in various pools that could potentially
 	// pick up the job. GARM would allow this amount of time for runners to react
 	// before spinning up a new one and potentially having to scale down later.
 	MinimumJobAgeBackoff uint
-	// CachedGARMAgentRelease stores the cached JSON response from GARMAgentReleasesURL
-	CachedGARMAgentRelease datatypes.JSON
-	// CachedGARMAgentReleaseFetchedAt is the timestamp when the release data was last fetched
+	// CachedGARMAgentReleases stores the release index fetched from
+	// GARMAgentReleasesURL: the source URL plus the list of releases
+	// (a marshaled util.AgentReleaseIndex).
+	CachedGARMAgentReleases datatypes.JSON
+	// CachedGARMAgentReleaseFetchedAt is the timestamp when the release index was last fetched
 	CachedGARMAgentReleaseFetchedAt *time.Time
+	// AllowInsecureGARMAgent tells GARM to configure the garm-agent (when used) to connect
+	// to the GARM API even when not using TLS.
+	AllowInsecureGARMAgent bool
 
 	// CACertBundle holds a certificate bundle meant to validate the certificate
 	// used by GARM itself. This can be just the root certificate that can validate
@@ -104,6 +113,27 @@ type Template struct {
 
 	ScaleSets []ScaleSet `gorm:"foreignKey:TemplateID"`
 	Pools     []Pool     `gorm:"foreignKey:TemplateID"`
+}
+
+// Proxy holds a named proxy definition. Pools and scale sets may reference
+// a proxy, in which case runners created for them will be configured to use
+// the proxy settings defined here.
+type Proxy struct {
+	gorm.Model
+
+	Name        string `gorm:"index:idx_proxy_name,unique,expression:LOWER(name);type:varchar(64)"`
+	Description string `gorm:"type:text"`
+
+	HTTPProxy  string `gorm:"column:http_proxy;type:text"`
+	HTTPSProxy string `gorm:"column:https_proxy;type:text"`
+	NoProxy    string `gorm:"column:no_proxy;type:text"`
+
+	// Credentials holds the sealed proxy credentials (username/password),
+	// if any were set.
+	Credentials []byte
+
+	Pools     []Pool     `gorm:"foreignKey:ProxyID"`
+	ScaleSets []ScaleSet `gorm:"foreignKey:ProxyID"`
 }
 
 type Pool struct {
@@ -144,8 +174,14 @@ type Pool struct {
 	EnterpriseID *uuid.UUID `gorm:"index"`
 	Enterprise   Enterprise `gorm:"foreignKey:EnterpriseID"`
 
+	ForgeInstanceID *uuid.UUID    `gorm:"index"`
+	ForgeInstance   ForgeInstance `gorm:"foreignKey:ForgeInstanceID"`
+
 	TemplateID *uint    `gorm:"index"`
 	Template   Template `gorm:"foreignKey:TemplateID"`
+
+	ProxyID *uint `gorm:"index"`
+	Proxy   Proxy `gorm:"foreignKey:ProxyID"`
 
 	Instances []Instance `gorm:"foreignKey:PoolID"`
 	Priority  uint       `gorm:"index:idx_pool_priority"`
@@ -207,6 +243,9 @@ type ScaleSet struct {
 
 	TemplateID *uint    `gorm:"index"`
 	Template   Template `gorm:"foreignKey:TemplateID"`
+
+	ProxyID *uint `gorm:"index"`
+	Proxy   Proxy `gorm:"foreignKey:ProxyID"`
 
 	Tags      []*Tag     `gorm:"many2many:scaleset_tags;constraint:OnDelete:CASCADE,OnUpdate:CASCADE;"`
 	Instances []Instance `gorm:"foreignKey:ScaleSetFkID"`
@@ -318,6 +357,38 @@ type Enterprise struct {
 	Endpoint     GithubEndpoint `gorm:"foreignKey:EndpointName;constraint:OnDelete:SET NULL"`
 
 	Events []EnterpriseEvent `gorm:"foreignKey:EnterpriseID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE;"`
+}
+
+type ForgeInstanceEvent struct {
+	gorm.Model
+
+	EventType  params.EventType
+	EventLevel params.EventLevel
+	Message    string `gorm:"type:text"`
+
+	ForgeInstanceID uuid.UUID     `gorm:"index:idx_forgeinstance_event"`
+	ForgeInstance   ForgeInstance `gorm:"foreignKey:ForgeInstanceID"`
+}
+
+type ForgeInstance struct {
+	Base
+
+	GiteaCredentialsID *uint            `gorm:"index"`
+	GiteaCredentials   GiteaCredentials `gorm:"foreignKey:GiteaCredentialsID;constraint:OnDelete:SET NULL"`
+
+	PoolManagerRunning       bool
+	PoolManagerFailureReason string
+
+	WebhookSecret    []byte
+	Pools            []Pool                  `gorm:"foreignKey:ForgeInstanceID"`
+	Jobs             []WorkflowJob           `gorm:"foreignKey:ForgeInstanceID;constraint:OnDelete:SET NULL"`
+	PoolBalancerType params.PoolBalancerType `gorm:"type:varchar(64)"`
+	AgentMode        bool                    `gorm:"index:forgeinstance_agent_idx"`
+
+	EndpointName *string        `gorm:"uniqueIndex:idx_forgeinstance_endpoint_nocase,expression:LOWER(endpoint_name)"`
+	Endpoint     GithubEndpoint `gorm:"foreignKey:EndpointName;constraint:OnDelete:SET NULL"`
+
+	Events []ForgeInstanceEvent `gorm:"foreignKey:ForgeInstanceID;constraint:OnDelete:CASCADE,OnUpdate:CASCADE;"`
 }
 
 type Address struct {
@@ -453,6 +524,9 @@ type WorkflowJob struct {
 	EnterpriseID *uuid.UUID `gorm:"index"`
 	Enterprise   Enterprise `gorm:"foreignKey:EnterpriseID"`
 
+	ForgeInstanceID *uuid.UUID    `gorm:"index"`
+	ForgeInstance   ForgeInstance `gorm:"foreignKey:ForgeInstanceID"`
+
 	LockedBy uuid.UUID
 
 	CreatedAt time.Time
@@ -491,6 +565,12 @@ type GithubCredentials struct {
 	Endpoint     GithubEndpoint `gorm:"foreignKey:EndpointName"`
 	EndpointName *string        `gorm:"index"`
 
+	// ReserveUsageEnabled toggles whether or not to allocate a certain
+	// percentage of the available rate limit to critical operations such
+	// as delete operations for runners that have finished their jobs.
+	ReserveUsageEnabled    bool
+	ReserveUsagePercentage int
+
 	Repositories  []Repository   `gorm:"foreignKey:CredentialsID"`
 	Organizations []Organization `gorm:"foreignKey:CredentialsID"`
 	Enterprises   []Enterprise   `gorm:"foreignKey:CredentialsID"`
@@ -518,8 +598,9 @@ type GiteaCredentials struct {
 	Endpoint     GithubEndpoint `gorm:"foreignKey:EndpointName"`
 	EndpointName *string        `gorm:"index"`
 
-	Repositories  []Repository   `gorm:"foreignKey:GiteaCredentialsID"`
-	Organizations []Organization `gorm:"foreignKey:GiteaCredentialsID"`
+	Repositories   []Repository    `gorm:"foreignKey:GiteaCredentialsID"`
+	Organizations  []Organization  `gorm:"foreignKey:GiteaCredentialsID"`
+	ForgeInstances []ForgeInstance `gorm:"foreignKey:GiteaCredentialsID"`
 }
 
 func (g GiteaCredentials) GetEndpointName() *string {
@@ -561,6 +642,15 @@ func (e *Enterprise) GetEndpoint() GithubEndpoint {
 
 func (e *Enterprise) GetEndpointName() *string {
 	return e.EndpointName
+}
+
+// ForgeInstance implements ForgeEntity
+func (f *ForgeInstance) GetEndpoint() GithubEndpoint {
+	return f.Endpoint
+}
+
+func (f *ForgeInstance) GetEndpointName() *string {
+	return f.EndpointName
 }
 
 // FileObject represents the table that holds files. This can be used to store

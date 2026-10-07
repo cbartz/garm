@@ -69,7 +69,15 @@ export function getEntityName(entity: any, eagerCacheStores?: any): string {
 		const enterprise = eagerCacheStores.enterprises.find((e: any) => e.id === entity.enterprise_id);
 		return (enterprise && enterprise.name) ? enterprise.name : 'Unknown Entity';
 	}
-	
+	if (entity.forge_instance_id) {
+		if (eagerCacheStores?.forgeInstances) {
+			const fi = eagerCacheStores.forgeInstances.find((f: any) => f.id === entity.forge_instance_id);
+			if (fi?.endpoint?.name) return fi.endpoint.name;
+		}
+		if (entity.endpoint?.name) return entity.endpoint.name;
+		return 'Unknown Entity';
+	}
+
 	return 'Unknown Entity';
 }
 
@@ -80,6 +88,7 @@ export function getEntityType(entity: any): string {
 	if (entity.repo_id) return 'repository';
 	if (entity.org_id) return 'organization';
 	if (entity.enterprise_id) return 'enterprise';
+	if (entity.forge_instance_id) return 'forge_instance';
 	return 'unknown';
 }
 
@@ -90,6 +99,7 @@ export function getEntityUrl(entity: any): string {
 	if (entity.repo_id) return resolve(`/repositories/${entity.repo_id}`);
 	if (entity.org_id) return resolve(`/organizations/${entity.org_id}`);
 	if (entity.enterprise_id) return resolve(`/enterprises/${entity.enterprise_id}`);
+	if (entity.forge_instance_id) return resolve(`/forge-instances/${entity.forge_instance_id}`);
 	return '#';
 }
 
@@ -296,3 +306,21 @@ export function getPaginationInfo(currentPage: number, perPage: number, totalIte
 	return `Showing ${start} to ${end} of ${totalItems} results`;
 }
 
+
+/**
+ * Highest allowed value for the rate limit reserve percentage. Mirrors the
+ * server-side cap (params.MaxReserveUsagePercentage): reserving more than
+ * half of the quota leaves too little for normal operations.
+ */
+export const MAX_RESERVE_USAGE_PERCENTAGE = 50;
+
+/**
+ * Validates the rate limit reserve percentage. Returns an error message, or
+ * null when the value is valid.
+ */
+export function validateReservePercentage(percentage: number): string | null {
+	if (!Number.isInteger(percentage) || percentage < 0 || percentage > MAX_RESERVE_USAGE_PERCENTAGE) {
+		return `Reserved percentage must be an integer between 0 and ${MAX_RESERVE_USAGE_PERCENTAGE}.`;
+	}
+	return null;
+}

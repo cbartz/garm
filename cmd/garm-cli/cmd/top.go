@@ -17,34 +17,58 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
+	"math/rand"
 	"os/signal"
-	"sort"
+	"slices"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/gdamore/tcell/v2"
 	"github.com/gorilla/websocket"
 	"github.com/rivo/tview"
 	"github.com/spf13/cobra"
 
-	commonParams "github.com/cloudbase/garm-provider-common/params"
 	garmWs "github.com/cloudbase/garm-provider-common/util/websocket"
+	apiClientController "github.com/cloudbase/garm/client/controller_info"
 	apiClientInstances "github.com/cloudbase/garm/client/instances"
 	apiClientJobs "github.com/cloudbase/garm/client/jobs"
+	dbCommon "github.com/cloudbase/garm/database/common"
 	"github.com/cloudbase/garm/params"
+	wsEvents "github.com/cloudbase/garm/workers/websocket/events"
 	"github.com/cloudbase/garm/workers/websocket/metrics"
 )
 
+// changePayload mirrors database/common.ChangePayload. It is redeclared here
+// (rather than imported) because ChangePayload carries the payload as an
+// opaque interface{}; the dashboard needs the raw bytes so it can decode them
+// based on the entity type.
+type changePayload struct {
+	EntityType dbCommon.DatabaseEntityType `json:"entity-type"`
+	Operation  dbCommon.OperationType      `json:"operation"`
+	Payload    json.RawMessage             `json:"payload"`
+}
+
+// topEventTypes are the entity types the dashboard subscribes to.
+var topEventTypes = []dbCommon.DatabaseEntityType{
+	dbCommon.RepositoryEntityType,
+	dbCommon.OrganizationEntityType,
+	dbCommon.EnterpriseEntityType,
+	dbCommon.ForgeInstanceEntityType,
+	dbCommon.PoolEntityType,
+	dbCommon.ScaleSetEntityType,
+	dbCommon.InstanceEntityType,
+	dbCommon.JobEntityType,
+	dbCommon.ControllerEntityType,
+}
+
+// connState describes the dashboard's connection to the GARM server.
+type connState int
+
 const (
-	jobQueued     = "queued"
-	jobInProgress = "in_progress"
-	jobCompleted  = "completed"
-
-	opDelete = "delete"
-
-	// Event entity type strings (as used in the events WebSocket).
-	evtRepository   = "repository"
-	evtOrganization = "organization"
+	connConnecting connState = iota
+	connConnected
+	connReconnecting
 )
 
 // topState holds the mutable state updated by WebSocket handlers.
@@ -53,20 +77,446 @@ type topState struct {
 	instances    map[string]params.Instance // keyed by instance ID
 	jobs         map[int64]params.Job       // keyed by job ID
 	lastSnapshot *metrics.MetricsSnapshot   // latest metrics snapshot, patched by events
+	controller   *params.ControllerInfo
+
+	conn       connState
+	connDetail string    // e.g. "retrying in 4s"
+	lastUpdate time.Time // wall clock of the last processed frame
+
+	// Instances and jobs are event-sourced: unlike entities/pools they are
+	// not part of the periodic snapshot, so a REST seed reconciles them (on
+	// connect and periodically). Events that arrive while a seed is in
+	// flight are fresher than the seed response; touched* records the keys
+	// they modified or deleted so reconcile leaves those alone.
+	seeding          bool
+	touchedInstances map[string]struct{}
+	touchedJobs      map[int64]struct{}
 }
 
-// changePayload mirrors database/common.ChangePayload for JSON decoding.
-type changePayload struct {
-	EntityType string          `json:"entity-type"`
-	Operation  string          `json:"operation"`
-	Payload    json.RawMessage `json:"payload"`
+func newTopState() *topState {
+	return &topState{
+		instances: make(map[string]params.Instance),
+		jobs:      make(map[int64]params.Job),
+	}
+}
+
+func (s *topState) setConn(state connState, detail string) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.conn = state
+	s.connDetail = detail
+}
+
+// beginSeed marks the start of a REST seed. Until reconcile (or abortSeed)
+// is called, applyChange records which keys events have modified.
+func (s *topState) beginSeed() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.seeding = true
+	s.touchedInstances = make(map[string]struct{})
+	s.touchedJobs = make(map[int64]struct{})
+}
+
+func (s *topState) abortSeed() {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.seeding = false
+	s.touchedInstances = nil
+	s.touchedJobs = nil
+}
+
+// reconcile folds a seed response into the state: entries the seed lists are
+// upserted, entries it does not list are removed. Keys touched by events
+// since beginSeed are skipped entirely — the event stream is fresher than
+// the REST response.
+func (s *topState) reconcile(instances []params.Instance, jobs []params.Job) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	seenInstances := make(map[string]struct{}, len(instances))
+	for _, inst := range instances {
+		if inst.ID == "" {
+			continue
+		}
+		seenInstances[inst.ID] = struct{}{}
+		if _, touched := s.touchedInstances[inst.ID]; !touched {
+			s.instances[inst.ID] = inst
+		}
+	}
+	for id := range s.instances {
+		if _, seen := seenInstances[id]; seen {
+			continue
+		}
+		if _, touched := s.touchedInstances[id]; touched {
+			continue
+		}
+		delete(s.instances, id)
+	}
+
+	seenJobs := make(map[int64]struct{}, len(jobs))
+	for _, j := range jobs {
+		if j.ID == 0 {
+			continue
+		}
+		seenJobs[j.ID] = struct{}{}
+		if _, touched := s.touchedJobs[j.ID]; !touched {
+			s.jobs[j.ID] = j
+		}
+	}
+	for id := range s.jobs {
+		if _, seen := seenJobs[id]; seen {
+			continue
+		}
+		if _, touched := s.touchedJobs[id]; touched {
+			continue
+		}
+		delete(s.jobs, id)
+	}
+
+	s.seeding = false
+	s.touchedInstances = nil
+	s.touchedJobs = nil
+	s.lastUpdate = time.Now()
+}
+
+func (s *topState) setSnapshot(snap *metrics.MetricsSnapshot) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastSnapshot = snap
+	s.lastUpdate = time.Now()
+}
+
+func (s *topState) setController(info params.ControllerInfo) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.controller = &info
+}
+
+// renderData is a self-contained copy of the dashboard state, safe to render
+// without holding the state lock.
+type renderData struct {
+	haveSnapshot bool
+	entities     []metrics.MetricsEntity
+	pools        []metrics.MetricsPool
+	scaleSets    []metrics.MetricsScaleSet
+	instances    []params.Instance
+	jobs         []params.Job
+	controller   *params.ControllerInfo
+	conn         connState
+	connDetail   string
+	lastUpdate   time.Time
+}
+
+// copyData snapshots the state for rendering. The slices are cloned because
+// the event handlers patch the snapshot in place while rendering happens on
+// the UI goroutine.
+func (s *topState) copyData() renderData {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	data := renderData{
+		haveSnapshot: s.lastSnapshot != nil,
+		instances:    slices.Collect(maps.Values(s.instances)),
+		jobs:         slices.Collect(maps.Values(s.jobs)),
+		conn:         s.conn,
+		connDetail:   s.connDetail,
+		lastUpdate:   s.lastUpdate,
+	}
+	if s.lastSnapshot != nil {
+		data.entities = slices.Clone(s.lastSnapshot.Entities)
+		data.pools = slices.Clone(s.lastSnapshot.Pools)
+		data.scaleSets = slices.Clone(s.lastSnapshot.ScaleSets)
+	}
+	if s.controller != nil {
+		ctrl := *s.controller
+		data.controller = &ctrl
+	}
+	return data
+}
+
+// applyEvent returns the list with item upserted (matched element replaced or
+// appended) or, when isDelete is set, with matching elements removed.
+func applyEvent[E any](list []E, item E, match func(E) bool, isDelete bool) []E {
+	if isDelete {
+		return slices.DeleteFunc(list, match)
+	}
+	if i := slices.IndexFunc(list, match); i >= 0 {
+		list[i] = item
+		return list
+	}
+	return append(list, item)
+}
+
+// applyChange folds a single WebSocket event into the state. Pool, scale set
+// and entity events patch the latest metrics snapshot; until the first
+// snapshot arrives they are dropped, as the snapshot will include them anyway.
+func (s *topState) applyChange(cp changePayload) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lastUpdate = time.Now()
+
+	isDelete := cp.Operation == dbCommon.DeleteOperation
+	switch cp.EntityType {
+	case dbCommon.InstanceEntityType:
+		var inst params.Instance
+		if err := json.Unmarshal(cp.Payload, &inst); err != nil || inst.ID == "" {
+			return
+		}
+		if s.seeding {
+			s.touchedInstances[inst.ID] = struct{}{}
+		}
+		if isDelete {
+			delete(s.instances, inst.ID)
+		} else {
+			s.instances[inst.ID] = inst
+		}
+	case dbCommon.JobEntityType:
+		var job params.Job
+		if err := json.Unmarshal(cp.Payload, &job); err != nil || job.ID == 0 {
+			return
+		}
+		if s.seeding {
+			s.touchedJobs[job.ID] = struct{}{}
+		}
+		if isDelete {
+			delete(s.jobs, job.ID)
+		} else {
+			s.jobs[job.ID] = job
+		}
+	case dbCommon.ControllerEntityType:
+		var info params.ControllerInfo
+		if err := json.Unmarshal(cp.Payload, &info); err != nil {
+			return
+		}
+		s.controller = &info
+	case dbCommon.PoolEntityType:
+		if s.lastSnapshot == nil {
+			return
+		}
+		var pool params.Pool
+		if err := json.Unmarshal(cp.Payload, &pool); err != nil || pool.ID == "" {
+			return
+		}
+		item := poolToMetrics(pool)
+		// Pool events carry the forge instance only by ID; keep the name
+		// resolved by the snapshot.
+		if i := slices.IndexFunc(s.lastSnapshot.Pools, func(p metrics.MetricsPool) bool { return p.ID == pool.ID }); i >= 0 {
+			item.ForgeInstanceName = s.lastSnapshot.Pools[i].ForgeInstanceName
+		}
+		s.lastSnapshot.Pools = applyEvent(s.lastSnapshot.Pools, item,
+			func(p metrics.MetricsPool) bool { return p.ID == pool.ID }, isDelete)
+	case dbCommon.ScaleSetEntityType:
+		var ss params.ScaleSet
+		if err := json.Unmarshal(cp.Payload, &ss); err != nil || ss.ID == 0 {
+			return
+		}
+		if s.lastSnapshot == nil {
+			return
+		}
+		s.lastSnapshot.ScaleSets = applyEvent(s.lastSnapshot.ScaleSets, scaleSetToMetrics(ss),
+			func(m metrics.MetricsScaleSet) bool { return m.ID == ss.ID }, isDelete)
+	case dbCommon.RepositoryEntityType, dbCommon.OrganizationEntityType, dbCommon.EnterpriseEntityType,
+		dbCommon.ForgeInstanceEntityType:
+		if s.lastSnapshot == nil {
+			return
+		}
+		entity := entityEventToMetrics(cp.EntityType, cp.Payload)
+		if entity.ID == "" {
+			return
+		}
+		match := func(e metrics.MetricsEntity) bool { return e.ID == entity.ID }
+		// Entity events do not carry pool/scale set counts; preserve the
+		// counts from the snapshot.
+		if i := slices.IndexFunc(s.lastSnapshot.Entities, match); i >= 0 {
+			entity.PoolCount = s.lastSnapshot.Entities[i].PoolCount
+			entity.ScaleSetCount = s.lastSnapshot.Entities[i].ScaleSetCount
+		}
+		s.lastSnapshot.Entities = applyEvent(s.lastSnapshot.Entities, entity, match, isDelete)
+	}
+}
+
+// seedTop fetches the instance, job and controller state over REST and
+// reconciles it into the state. Events applied between beginSeed and
+// reconcile win over the REST response.
+func seedTop(state *topState) error {
+	state.beginSeed()
+	instResp, err := apiCli.Instances.ListInstances(apiClientInstances.NewListInstancesParams(), authToken)
+	if err != nil {
+		state.abortSeed()
+		return fmt.Errorf("failed to list instances: %w", err)
+	}
+	jobsResp, err := apiCli.Jobs.ListJobs(apiClientJobs.NewListJobsParams(), authToken)
+	if err != nil {
+		state.abortSeed()
+		return fmt.Errorf("failed to list jobs: %w", err)
+	}
+	state.reconcile(instResp.Payload, jobsResp.Payload)
+
+	// Controller info is nice-to-have header decoration; it also arrives
+	// via controller events, so a failure here is not fatal.
+	if ctrlResp, err := apiCli.ControllerInfo.ControllerInfo(apiClientController.NewControllerInfoParams(), authToken); err == nil {
+		state.setController(ctrlResp.Payload)
+	}
+	return nil
+}
+
+// isAuthError reports whether a WebSocket dial error looks like an expired
+// or rejected token. The reader formats the HTTP status into the error text,
+// which is all we have to go on.
+func isAuthError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "401") || strings.Contains(msg, "Unauthorized")
+}
+
+const topReseedInterval = 60 * time.Second
+
+// runTopStreams maintains the WebSocket connections for the dashboard,
+// reconnecting with backoff when they drop. It blocks until ctx is canceled
+// or an authentication error occurs (returned as a fatal error). notify
+// requests a UI repaint.
+func runTopStreams(ctx context.Context, state *topState, notify func()) error {
+	backoff := time.Second
+	const maxBackoff = 30 * time.Second
+	for {
+		state.setConn(connConnecting, "")
+		notify()
+
+		err := runTopStreamsOnce(ctx, state, func() {
+			backoff = time.Second
+			state.setConn(connConnected, "")
+			notify()
+		})
+		if ctx.Err() != nil {
+			return nil //nolint:nilerr // shutting down; stream errors are expected
+		}
+		if isAuthError(err) {
+			return fmt.Errorf("session rejected by the server (token expired?): run `garm-cli profile login` and start top again")
+		}
+
+		detail := fmt.Sprintf("retrying in %s", backoff.Round(time.Second))
+		if err != nil {
+			detail = fmt.Sprintf("%s — retrying in %s", connErrorSummary(err), backoff.Round(time.Second))
+		}
+		state.setConn(connReconnecting, detail)
+		notify()
+
+		// Full backoff plus up to 25% jitter, so a fleet of dashboards does
+		// not stampede a restarting server.
+		wait := backoff + time.Duration(rand.Int63n(int64(backoff/4+1))) // #nosec G404 - jitter, not crypto
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-time.After(wait):
+		}
+		backoff = min(backoff*2, maxBackoff)
+	}
+}
+
+// connErrorSummary trims a websocket dial/read error down to something that
+// fits in the dashboard header.
+func connErrorSummary(err error) string {
+	msg := err.Error()
+	if idx := strings.LastIndex(msg, ": "); idx >= 0 && idx+2 < len(msg) {
+		msg = msg[idx+2:]
+	}
+	const maxLen = 60
+	if len(msg) > maxLen {
+		msg = msg[:maxLen]
+	}
+	return msg
+}
+
+// runTopStreamsOnce establishes the events and metrics streams, seeds the
+// state and waits for either stream to die, reseeding periodically. It
+// subscribes to events before seeding so no change is lost in between.
+// onConnected is called once both streams are up and the seed succeeded.
+func runTopStreamsOnce(ctx context.Context, state *topState, onConnected func()) error {
+	streamCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	eventsHandler := func(_ int, msg []byte) error {
+		var cp changePayload
+		if err := json.Unmarshal(msg, &cp); err != nil {
+			return nil //nolint:nilerr // tolerate malformed frames
+		}
+		state.applyChange(cp)
+		return nil
+	}
+	eventsReader, err := garmWs.NewReader(streamCtx, mgr.BaseURL, "/api/v1/ws/events", mgr.Token, eventsHandler)
+	if err != nil {
+		return fmt.Errorf("failed to connect to events WebSocket: %w", err)
+	}
+	if err := eventsReader.Start(); err != nil {
+		return fmt.Errorf("failed to connect to events WebSocket: %w", err)
+	}
+	defer eventsReader.Stop()
+
+	filters := make([]wsEvents.Filter, 0, len(topEventTypes))
+	for _, entityType := range topEventTypes {
+		filters = append(filters, wsEvents.Filter{EntityType: entityType})
+	}
+	filterMsg, err := json.Marshal(wsEvents.Options{Filters: filters})
+	if err != nil {
+		return fmt.Errorf("failed to encode events filter: %w", err)
+	}
+	if err := eventsReader.WriteMessage(websocket.TextMessage, filterMsg); err != nil {
+		return fmt.Errorf("failed to send events filter: %w", err)
+	}
+
+	metricsHandler := func(_ int, msg []byte) error {
+		var snap metrics.MetricsSnapshot
+		if err := json.Unmarshal(msg, &snap); err != nil {
+			return nil //nolint:nilerr // tolerate malformed frames
+		}
+		state.setSnapshot(&snap)
+		return nil
+	}
+	metricsReader, err := garmWs.NewReader(streamCtx, mgr.BaseURL, "/api/v1/ws/metrics", mgr.Token, metricsHandler)
+	if err != nil {
+		return fmt.Errorf("failed to connect to metrics WebSocket: %w", err)
+	}
+	if err := metricsReader.Start(); err != nil {
+		return fmt.Errorf("failed to connect to metrics WebSocket: %w", err)
+	}
+	defer metricsReader.Stop()
+
+	if err := seedTop(state); err != nil {
+		return err
+	}
+	onConnected()
+
+	reseed := time.NewTicker(topReseedInterval)
+	defer reseed.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		case <-eventsReader.Done():
+			return fmt.Errorf("events stream closed")
+		case <-metricsReader.Done():
+			return fmt.Errorf("metrics stream closed")
+		case <-reseed.C:
+			// Periodic reconciliation heals anything a missed event left
+			// behind. Errors are transient by definition here: the streams
+			// are still up, so just try again next tick.
+			_ = seedTop(state)
+		}
+	}
 }
 
 var topCmd = &cobra.Command{
 	Use:          "top",
 	SilenceUsage: true,
 	Short:        "Live dashboard of GARM metrics",
-	Long:         `Interactive terminal UI showing live GARM metrics, refreshed every 5 seconds via WebSocket.`,
+	Long: `Interactive terminal UI showing live GARM state, fed by the events
+WebSocket and 5-second metrics snapshots. The connection is re-established
+automatically if it drops.
+
+Keys: Tab/1-4 switch panels, Enter shows details, / filters the focused
+panel, z zooms, l tails the server log, d/e run actions, ? shows help,
+q quits.`,
 	RunE: func(_ *cobra.Command, _ []string) error {
 		if needsInit {
 			return errNeedsInitError
@@ -74,990 +524,77 @@ var topCmd = &cobra.Command{
 
 		ctx, stop := signal.NotifyContext(context.Background(), signals...)
 		defer stop()
+		ctx, cancel := context.WithCancel(ctx)
+		defer cancel()
 
+		state := newTopState()
 		app := tview.NewApplication()
-		state := &topState{
-			instances: make(map[string]params.Instance),
-			jobs:      make(map[int64]params.Job),
-		}
+		ui := newTopUI(app, state)
+		ui.ctx = ctx // scopes background helpers like the log stream
 
-		// --- Seed initial data from API ---
-
-		if resp, err := apiCli.Instances.ListInstances(apiClientInstances.NewListInstancesParams(), authToken); err == nil {
-			for _, inst := range resp.Payload {
-				if inst.ID != "" {
-					state.instances[inst.ID] = inst
-				}
+		// Rendering is coalesced: handlers mark the state dirty and a single
+		// goroutine repaints, so event storms cannot back up the WebSocket
+		// readers behind the UI loop. The ticker keeps clocks and AGE
+		// columns moving between frames.
+		renderRequests := make(chan struct{}, 1)
+		notify := func() {
+			select {
+			case renderRequests <- struct{}{}:
+			default:
 			}
 		}
-		if resp, err := apiCli.Jobs.ListJobs(apiClientJobs.NewListJobsParams(), authToken); err == nil {
-			for _, j := range resp.Payload {
-				if j.ID != 0 {
-					state.jobs[j.ID] = j
-				}
-			}
-		}
+		ui.notify = notify
 
-		// --- Build TUI layout ---
-
-		// Explicit dark color scheme so the TUI looks consistent
-		// regardless of light/dark terminal theme.
-		bgColor := tcell.Color235 // #262626 - dark gray
-		fgColor := tcell.ColorWhite
-		borderColor := tcell.ColorLightGray
-
-		tview.Styles.PrimitiveBackgroundColor = bgColor
-		tview.Styles.ContrastBackgroundColor = bgColor
-		tview.Styles.PrimaryTextColor = fgColor
-		tview.Styles.BorderColor = borderColor
-		tview.Styles.TitleColor = fgColor
-
-		header := tview.NewTextView().
-			SetDynamicColors(true).
-			SetTextAlign(tview.AlignLeft)
-		header.SetBorder(false).SetBackgroundColor(bgColor)
-
-		summary := tview.NewTextView().
-			SetDynamicColors(true).
-			SetTextAlign(tview.AlignLeft)
-		summary.SetBorder(true).
-			SetTitle(" Summary ").
-			SetTitleAlign(tview.AlignLeft).
-			SetBackgroundColor(bgColor)
-
-		entitiesTable := tview.NewTable().
-			SetBorders(false).
-			SetSelectable(true, false).
-			SetFixed(1, 0)
-		entitiesTable.SetBorder(true).
-			SetTitle(" Entities ").
-			SetTitleAlign(tview.AlignLeft).
-			SetBackgroundColor(bgColor)
-
-		poolsTable := tview.NewTable().
-			SetBorders(false).
-			SetSelectable(true, false).
-			SetFixed(1, 0)
-		poolsTable.SetBorder(true).
-			SetTitle(" Pools & Scale Sets ").
-			SetTitleAlign(tview.AlignLeft).
-			SetBackgroundColor(bgColor)
-
-		instancesTable := tview.NewTable().
-			SetBorders(false).
-			SetSelectable(true, false).
-			SetFixed(1, 0)
-		instancesTable.SetBorder(true).
-			SetTitle(" Instances ").
-			SetTitleAlign(tview.AlignLeft).
-			SetBackgroundColor(bgColor)
-
-		jobsTable := tview.NewTable().
-			SetBorders(false).
-			SetSelectable(true, false).
-			SetFixed(1, 0)
-		jobsTable.SetBorder(true).
-			SetTitle(" Jobs ").
-			SetTitleAlign(tview.AlignLeft).
-			SetBackgroundColor(bgColor)
-
-		footer := tview.NewTextView().
-			SetDynamicColors(true).
-			SetTextAlign(tview.AlignCenter)
-		footer.SetBorder(false).SetBackgroundColor(bgColor)
-		footer.SetText("[yellow]Tab[white]: switch panel  [yellow]↑↓[white]: scroll  [yellow]q[white]: quit")
-
-		// Two-column layout: left (entities + pools) | right (instances + jobs)
-		leftCol := tview.NewFlex().SetDirection(tview.FlexRow).
-			AddItem(entitiesTable, 0, 1, true).
-			AddItem(poolsTable, 0, 1, false)
-
-		rightCol := tview.NewFlex().SetDirection(tview.FlexRow).
-			AddItem(instancesTable, 0, 1, false).
-			AddItem(jobsTable, 0, 1, false)
-
-		columns := tview.NewFlex().SetDirection(tview.FlexColumn).
-			AddItem(leftCol, 0, 1, true).
-			AddItem(rightCol, 0, 1, false)
-
-		layout := tview.NewFlex().SetDirection(tview.FlexRow).
-			AddItem(header, 1, 0, false).
-			AddItem(summary, 5, 0, false).
-			AddItem(columns, 0, 1, true).
-			AddItem(footer, 1, 0, false)
-
-		// Panel focus cycling
-		panels := []tview.Primitive{entitiesTable, poolsTable, instancesTable, jobsTable}
-		panelBorders := []*tview.Table{entitiesTable, poolsTable, instancesTable, jobsTable}
-		focusIndex := 0
-
-		setFocus := func(idx int) {
-			for i, p := range panelBorders {
-				if i == idx {
-					p.SetBorderColor(tcell.ColorDodgerBlue)
-				} else {
-					p.SetBorderColor(tcell.ColorWhite)
-				}
-			}
-			app.SetFocus(panels[idx])
-		}
-		setFocus(0)
-
-		updateHeader(header, mgr.BaseURL, "connecting")
-
-		// Keybindings
-		app.SetInputCapture(func(event *tcell.EventKey) *tcell.EventKey {
-			switch {
-			case event.Rune() == 'q':
-				app.Stop()
-				return nil
-			case event.Key() == tcell.KeyTab:
-				focusIndex = (focusIndex + 1) % len(panels)
-				setFocus(focusIndex)
-				return nil
-			case event.Key() == tcell.KeyBacktab:
-				focusIndex = (focusIndex - 1 + len(panels)) % len(panels)
-				setFocus(focusIndex)
-				return nil
-			}
-			return event
-		})
-
-		// --- Metrics WebSocket (5s snapshots) ---
-
-		metricsConnected := false
-
-		// renderAll re-renders the full TUI using the latest snapshot and state.
-		// Must be called via app.QueueUpdateDraw.
-		renderAll := func() {
-			state.mu.Lock()
-			snap := state.lastSnapshot
-			if snap == nil {
-				state.mu.Unlock()
-				return
-			}
-			instances := make([]params.Instance, 0, len(state.instances))
-			for _, inst := range state.instances {
-				instances = append(instances, inst)
-			}
-			jobs := make([]params.Job, 0, len(state.jobs))
-			for _, j := range state.jobs {
-				jobs = append(jobs, j)
-			}
-			state.mu.Unlock()
-
-			updateHeader(header, mgr.BaseURL, "connected")
-			renderSummary(summary, snap, len(instances), jobs)
-			renderEntitiesTable(entitiesTable, snap.Entities)
-			renderPoolsTable(poolsTable, snap.Pools, snap.ScaleSets)
-			renderInstancesTable(instancesTable, instances)
-			renderJobsTable(jobsTable, jobs)
-		}
-
-		metricsHandler := func(_ int, msg []byte) error {
-			var snap metrics.MetricsSnapshot
-			if err := json.Unmarshal(msg, &snap); err != nil {
-				return nil
-			}
-
-			state.mu.Lock()
-			state.lastSnapshot = &snap
-			state.mu.Unlock()
-
-			metricsConnected = true
-			app.QueueUpdateDraw(renderAll)
-			return nil
-		}
-
-		metricsReader, err := garmWs.NewReader(ctx, mgr.BaseURL, "/api/v1/ws/metrics", mgr.Token, metricsHandler)
-		if err != nil {
-			return fmt.Errorf("failed to connect to metrics WebSocket: %w", err)
-		}
-		if err := metricsReader.Start(); err != nil {
-			return fmt.Errorf("failed to start metrics reader: %w", err)
-		}
-
-		// --- Events WebSocket (all entity types) ---
-
-		eventsHandler := func(_ int, msg []byte) error {
-			var cp changePayload
-			if err := json.Unmarshal(msg, &cp); err != nil {
-				return nil
-			}
-
-			state.mu.Lock()
-			switch cp.EntityType {
-			case "instance":
-				if cp.Operation == opDelete {
-					var inst params.Instance
-					if err := json.Unmarshal(cp.Payload, &inst); err == nil && inst.ID != "" {
-						delete(state.instances, inst.ID)
-					}
-				} else {
-					var inst params.Instance
-					if err := json.Unmarshal(cp.Payload, &inst); err == nil && inst.ID != "" {
-						state.instances[inst.ID] = inst
-					}
-				}
-			case "job":
-				if cp.Operation == opDelete {
-					var job params.Job
-					if err := json.Unmarshal(cp.Payload, &job); err == nil && job.ID != 0 {
-						delete(state.jobs, job.ID)
-					}
-				} else {
-					var job params.Job
-					if err := json.Unmarshal(cp.Payload, &job); err == nil && job.ID != 0 {
-						state.jobs[job.ID] = job
-					}
-				}
-			case "pool":
-				if state.lastSnapshot != nil {
-					var pool params.Pool
-					if err := json.Unmarshal(cp.Payload, &pool); err == nil && pool.ID != "" {
-						if cp.Operation == opDelete {
-							filtered := make([]metrics.MetricsPool, 0, len(state.lastSnapshot.Pools))
-							for _, p := range state.lastSnapshot.Pools {
-								if p.ID != pool.ID {
-									filtered = append(filtered, p)
-								}
-							}
-							state.lastSnapshot.Pools = filtered
-						} else {
-							found := false
-							for i, p := range state.lastSnapshot.Pools {
-								if p.ID == pool.ID {
-									state.lastSnapshot.Pools[i] = poolToMetrics(pool)
-									found = true
-									break
-								}
-							}
-							if !found {
-								state.lastSnapshot.Pools = append(state.lastSnapshot.Pools, poolToMetrics(pool))
-							}
-						}
-					}
-				}
-			case "scaleset":
-				if state.lastSnapshot != nil {
-					var ss params.ScaleSet
-					if err := json.Unmarshal(cp.Payload, &ss); err == nil && ss.ID != 0 {
-						if cp.Operation == opDelete {
-							filtered := make([]metrics.MetricsScaleSet, 0, len(state.lastSnapshot.ScaleSets))
-							for _, s := range state.lastSnapshot.ScaleSets {
-								if s.ID != ss.ID {
-									filtered = append(filtered, s)
-								}
-							}
-							state.lastSnapshot.ScaleSets = filtered
-						} else {
-							found := false
-							for i, s := range state.lastSnapshot.ScaleSets {
-								if s.ID == ss.ID {
-									state.lastSnapshot.ScaleSets[i] = scaleSetToMetrics(ss)
-									found = true
-									break
-								}
-							}
-							if !found {
-								state.lastSnapshot.ScaleSets = append(state.lastSnapshot.ScaleSets, scaleSetToMetrics(ss))
-							}
-						}
-					}
-				}
-			case evtRepository, evtOrganization, entityTypeEnterprise:
-				if state.lastSnapshot != nil {
-					entity := entityEventToMetrics(cp.EntityType, cp.Payload)
-					if entity.ID != "" {
-						if cp.Operation == opDelete {
-							filtered := make([]metrics.MetricsEntity, 0, len(state.lastSnapshot.Entities))
-							for _, e := range state.lastSnapshot.Entities {
-								if e.ID != entity.ID {
-									filtered = append(filtered, e)
-								}
-							}
-							state.lastSnapshot.Entities = filtered
-						} else {
-							found := false
-							for i, e := range state.lastSnapshot.Entities {
-								if e.ID == entity.ID {
-									// Preserve pool/scaleset counts from snapshot, update the rest
-									entity.PoolCount = e.PoolCount
-									entity.ScaleSetCount = e.ScaleSetCount
-									state.lastSnapshot.Entities[i] = entity
-									found = true
-									break
-								}
-							}
-							if !found {
-								state.lastSnapshot.Entities = append(state.lastSnapshot.Entities, entity)
-							}
-						}
-					}
-				}
-			}
-			state.mu.Unlock()
-
-			// Trigger immediate re-render for any entity type change
-			app.QueueUpdateDraw(renderAll)
-			return nil
-		}
-
-		eventsReader, err := garmWs.NewReader(ctx, mgr.BaseURL, "/api/v1/ws/events", mgr.Token, eventsHandler)
-		if err != nil {
-			return fmt.Errorf("failed to connect to events WebSocket: %w", err)
-		}
-		if err := eventsReader.Start(); err != nil {
-			return fmt.Errorf("failed to start events reader: %w", err)
-		}
-
-		// Send filter to events WebSocket — subscribe to all entity types relevant to the TUI
-		eventsFilter := `{"filters":[` +
-			`{"entity-type":"repository","operations":["create","update","delete"]},` +
-			`{"entity-type":"organization","operations":["create","update","delete"]},` +
-			`{"entity-type":"enterprise","operations":["create","update","delete"]},` +
-			`{"entity-type":"pool","operations":["create","update","delete"]},` +
-			`{"entity-type":"scaleset","operations":["create","update","delete"]},` +
-			`{"entity-type":"instance","operations":["create","update","delete"]},` +
-			`{"entity-type":"job","operations":["create","update","delete"]}]}`
-		if err := eventsReader.WriteMessage(websocket.TextMessage, []byte(eventsFilter)); err != nil {
-			return fmt.Errorf("failed to send events filter: %w", err)
-		}
-
-		// Watch for disconnect
 		go func() {
-			<-metricsReader.Done()
-			if metricsConnected {
-				app.QueueUpdateDraw(func() {
-					updateHeader(header, mgr.BaseURL, "disconnected")
-				})
+			ticker := time.NewTicker(time.Second)
+			defer ticker.Stop()
+			for {
+				select {
+				case <-ctx.Done():
+					return
+				case <-renderRequests:
+				case <-ticker.C:
+				}
+				app.QueueUpdateDraw(func() { ui.render(state.copyData()) })
+				// Rate-limit repaints; anything that arrives in between is
+				// absorbed by the dirty flag.
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(100 * time.Millisecond):
+				}
 			}
-			time.Sleep(2 * time.Second)
-			app.Stop()
+		}()
+
+		var fatalMu sync.Mutex
+		var fatalErr error
+		go func() {
+			err := runTopStreams(ctx, state, notify)
+			fatalMu.Lock()
+			fatalErr = err
+			fatalMu.Unlock()
+			if err != nil {
+				app.Stop()
+			}
 		}()
 
 		go func() {
 			<-ctx.Done()
-			metricsReader.Stop()
-			eventsReader.Stop()
 			app.Stop()
 		}()
 
-		if err := app.SetRoot(layout, true).EnableMouse(false).Run(); err != nil {
+		ui.render(state.copyData())
+		if err := app.SetRoot(ui.pages, true).EnableMouse(true).Run(); err != nil {
 			return fmt.Errorf("TUI error: %w", err)
 		}
+		cancel()
 
-		return nil
+		fatalMu.Lock()
+		defer fatalMu.Unlock()
+		return fatalErr
 	},
 }
 
 func init() {
 	rootCmd.AddCommand(topCmd)
-}
-
-func updateHeader(header *tview.TextView, baseURL, status string) {
-	now := time.Now().Format("15:04:05")
-	statusColor := "[green]"
-	switch status {
-	case "connecting":
-		statusColor = "[yellow]"
-	case "disconnected":
-		statusColor = "[red]"
-	}
-	header.SetText(fmt.Sprintf(
-		" [bold][white]GARM Top[white]  │  %s  │  %s%s[white]  │  %s",
-		baseURL, statusColor, status, now,
-	))
-}
-
-func renderSummary(view *tview.TextView, snap *metrics.MetricsSnapshot, instanceCount int, jobs []params.Job) {
-	repos, orgs, ents := 0, 0, 0
-	for _, e := range snap.Entities {
-		switch e.Type {
-		case evtRepository:
-			repos++
-		case evtOrganization:
-			orgs++
-		case entityTypeEnterprise:
-			ents++
-		}
-	}
-
-	totalPools := len(snap.Pools)
-	totalScaleSets := len(snap.ScaleSets)
-
-	// Runner status from metrics snapshot
-	buckets := map[string]int{}
-	for _, p := range snap.Pools {
-		for status, count := range p.RunnerStatusCounts {
-			cat, ok := runnerStatusCategory[params.RunnerStatus(status)]
-			if !ok {
-				cat = "other"
-			}
-			buckets[cat] += count
-		}
-	}
-	for _, ss := range snap.ScaleSets {
-		for status, count := range ss.RunnerStatusCounts {
-			cat, ok := runnerStatusCategory[params.RunnerStatus(status)]
-			if !ok {
-				cat = "other"
-			}
-			buckets[cat] += count
-		}
-	}
-	active, idle, offline, pending, other := buckets["active"], buckets["idle"], buckets["offline"], buckets["pending"], buckets["other"]
-
-	// Job counts
-	queuedCount, inProgressCount, completedCount := 0, 0, 0
-	for _, j := range jobs {
-		switch j.Status {
-		case jobQueued:
-			queuedCount++
-		case jobInProgress:
-			inProgressCount++
-		case jobCompleted:
-			completedCount++
-		}
-	}
-
-	line1 := fmt.Sprintf(
-		" [blue]Repos:[white] %d   [green]Orgs:[white] %d   [purple]Enterprises:[white] %d   [white]Pools:[white] %d   [white]Scale Sets:[white] %d   [white]Instances:[white] %d",
-		repos, orgs, ents, totalPools, totalScaleSets, instanceCount,
-	)
-
-	runnerLine := " "
-	if active > 0 {
-		runnerLine += fmt.Sprintf("[green]Active:[white] %d   ", active)
-	}
-	if idle > 0 {
-		runnerLine += fmt.Sprintf("[blue]Idle:[white] %d   ", idle)
-	}
-	if pending > 0 {
-		runnerLine += fmt.Sprintf("[yellow]Pending:[white] %d   ", pending)
-	}
-	if offline > 0 {
-		runnerLine += fmt.Sprintf("[red]Offline:[white] %d   ", offline)
-	}
-	if other > 0 {
-		runnerLine += fmt.Sprintf("[gray]Other:[white] %d   ", other)
-	}
-
-	jobLine := fmt.Sprintf(
-		" [white]Jobs: [yellow]%d queued[white], [green]%d running[white], [gray]%d completed",
-		queuedCount, inProgressCount, completedCount,
-	)
-
-	view.SetText(line1 + "\n" + runnerLine + "\n" + jobLine)
-}
-
-func renderEntitiesTable(table *tview.Table, entities []metrics.MetricsEntity) {
-	table.Clear()
-
-	headers := []string{"NAME", "TYPE", "ENDPOINT", "POOLS", "SCALESETS", "HEALTH"}
-	for i, h := range headers {
-		cell := tview.NewTableCell(h).
-			SetTextColor(tcell.ColorYellow).
-			SetSelectable(false).
-			SetExpansion(1)
-		if i >= 3 {
-			cell.SetAlign(tview.AlignRight)
-		}
-		table.SetCell(0, i, cell)
-	}
-
-	sorted := make([]metrics.MetricsEntity, len(entities))
-	copy(sorted, entities)
-	sort.Slice(sorted, func(i, j int) bool {
-		ti := sorted[i].PoolCount + sorted[i].ScaleSetCount
-		tj := sorted[j].PoolCount + sorted[j].ScaleSetCount
-		return ti > tj
-	})
-
-	for row, e := range sorted {
-		r := row + 1
-		typeLabel := e.Type
-		typeColor := tcell.ColorWhite
-		switch e.Type {
-		case evtRepository:
-			typeLabel = "repo"
-			typeColor = tcell.ColorDodgerBlue
-		case evtOrganization:
-			typeLabel = "org"
-			typeColor = tcell.ColorGreen
-		case entityTypeEnterprise:
-			typeLabel = "ent"
-			typeColor = tcell.ColorMediumPurple
-		}
-
-		healthColor := tcell.ColorGreen
-		healthStr := "✓"
-		if !e.Healthy {
-			healthColor = tcell.ColorRed
-			healthStr = "✗"
-		}
-
-		table.SetCell(r, 0, tview.NewTableCell(e.Name).SetExpansion(1))
-		table.SetCell(r, 1, tview.NewTableCell(typeLabel).SetTextColor(typeColor).SetExpansion(1))
-		table.SetCell(r, 2, tview.NewTableCell(e.Endpoint).SetExpansion(1))
-		table.SetCell(r, 3, tview.NewTableCell(fmt.Sprintf("%d", e.PoolCount)).SetAlign(tview.AlignRight).SetExpansion(1))
-		table.SetCell(r, 4, tview.NewTableCell(fmt.Sprintf("%d", e.ScaleSetCount)).SetAlign(tview.AlignRight).SetExpansion(1))
-		table.SetCell(r, 5, tview.NewTableCell(healthStr).SetTextColor(healthColor).SetAlign(tview.AlignRight).SetExpansion(1))
-	}
-
-	if len(entities) == 0 {
-		table.SetCell(1, 0, tview.NewTableCell("No entities configured").
-			SetTextColor(tcell.ColorGray).SetExpansion(1))
-	}
-}
-
-func renderPoolsTable(table *tview.Table, pools []metrics.MetricsPool, scaleSets []metrics.MetricsScaleSet) {
-	table.Clear()
-
-	headers := []string{"NAME", "PROVIDER", "OS", "RUNNERS", "CAP", "STATUS"}
-	for i, h := range headers {
-		cell := tview.NewTableCell(h).
-			SetTextColor(tcell.ColorYellow).
-			SetSelectable(false).
-			SetExpansion(1)
-		if i >= 3 {
-			cell.SetAlign(tview.AlignRight)
-		}
-		table.SetCell(0, i, cell)
-	}
-
-	row := 1
-
-	sortedPools := make([]metrics.MetricsPool, len(pools))
-	copy(sortedPools, pools)
-	sort.Slice(sortedPools, func(i, j int) bool {
-		if sortedPools[i].Enabled != sortedPools[j].Enabled {
-			return sortedPools[i].Enabled
-		}
-		ci := sumCounts(sortedPools[i].RunnerCounts)
-		cj := sumCounts(sortedPools[j].RunnerCounts)
-		return ci > cj
-	})
-
-	for _, p := range sortedPools {
-		name := topPoolDisplayName(p)
-		current := sumCounts(p.RunnerCounts)
-		maxRunners := int(p.MaxRunners)
-		utilization := 0
-		if maxRunners > 0 {
-			utilization = current * 100 / maxRunners
-		}
-
-		runnersStr := fmt.Sprintf("%d/%d", current, maxRunners)
-		capStr := fmt.Sprintf("%d%%", utilization)
-		capColor := tcell.ColorGreen
-		if utilization >= 90 {
-			capColor = tcell.ColorRed
-		} else if utilization >= 70 {
-			capColor = tcell.ColorYellow
-		}
-
-		statusStr := "enabled"
-		statusColor := tcell.ColorGreen
-		nameColor := tcell.ColorWhite
-		if !p.Enabled {
-			statusStr = "disabled"
-			statusColor = tcell.ColorGray
-			nameColor = tcell.ColorGray
-		}
-
-		table.SetCell(row, 0, tview.NewTableCell(name).SetTextColor(nameColor).SetExpansion(1))
-		table.SetCell(row, 1, tview.NewTableCell(p.ProviderName).SetExpansion(1))
-		table.SetCell(row, 2, tview.NewTableCell(p.OSType).SetExpansion(1))
-		table.SetCell(row, 3, tview.NewTableCell(runnersStr).SetAlign(tview.AlignRight).SetExpansion(1))
-		table.SetCell(row, 4, tview.NewTableCell(capStr).SetTextColor(capColor).SetAlign(tview.AlignRight).SetExpansion(1))
-		table.SetCell(row, 5, tview.NewTableCell(statusStr).SetTextColor(statusColor).SetAlign(tview.AlignRight).SetExpansion(1))
-		row++
-	}
-
-	for _, ss := range scaleSets {
-		name := ss.Name
-		if name == "" {
-			name = fmt.Sprintf("scaleset-%d", ss.ID)
-		}
-
-		current := sumCounts(ss.RunnerCounts)
-		maxRunners := int(ss.MaxRunners)
-		utilization := 0
-		if maxRunners > 0 {
-			utilization = current * 100 / maxRunners
-		}
-
-		runnersStr := fmt.Sprintf("%d/%d", current, maxRunners)
-		capStr := fmt.Sprintf("%d%%", utilization)
-		capColor := tcell.ColorGreen
-		if utilization >= 90 {
-			capColor = tcell.ColorRed
-		} else if utilization >= 70 {
-			capColor = tcell.ColorYellow
-		}
-
-		statusStr := "enabled"
-		statusColor := tcell.ColorGreen
-		nameColor := tcell.ColorWhite
-		if !ss.Enabled {
-			statusStr = "disabled"
-			statusColor = tcell.ColorGray
-			nameColor = tcell.ColorGray
-		}
-
-		table.SetCell(row, 0, tview.NewTableCell(name).SetTextColor(nameColor).SetExpansion(1))
-		table.SetCell(row, 1, tview.NewTableCell(ss.ProviderName).SetExpansion(1))
-		table.SetCell(row, 2, tview.NewTableCell(ss.OSType).SetExpansion(1))
-		table.SetCell(row, 3, tview.NewTableCell(runnersStr).SetAlign(tview.AlignRight).SetExpansion(1))
-		table.SetCell(row, 4, tview.NewTableCell(capStr).SetTextColor(capColor).SetAlign(tview.AlignRight).SetExpansion(1))
-		table.SetCell(row, 5, tview.NewTableCell(statusStr).SetTextColor(statusColor).SetAlign(tview.AlignRight).SetExpansion(1))
-		row++
-	}
-
-	if len(pools) == 0 && len(scaleSets) == 0 {
-		table.SetCell(1, 0, tview.NewTableCell("No pools or scale sets configured").
-			SetTextColor(tcell.ColorGray).SetExpansion(1))
-	}
-}
-
-func renderInstancesTable(table *tview.Table, instances []params.Instance) {
-	table.Clear()
-
-	headers := []string{"NAME", "STATUS", "RUNNER", "PROVIDER", "OS", "POOL/SS", "AGE"}
-	for i, h := range headers {
-		cell := tview.NewTableCell(h).
-			SetTextColor(tcell.ColorYellow).
-			SetSelectable(false).
-			SetExpansion(1)
-		table.SetCell(0, i, cell)
-	}
-
-	// Sort: running first, then by creation time desc
-	sorted := make([]params.Instance, len(instances))
-	copy(sorted, instances)
-	sort.Slice(sorted, func(i, j int) bool {
-		si := instanceStatusPriorities[sorted[i].Status]
-		sj := instanceStatusPriorities[sorted[j].Status]
-		if si != sj {
-			return si < sj
-		}
-		return sorted[i].CreatedAt.After(sorted[j].CreatedAt)
-	})
-
-	for row, inst := range sorted {
-		r := row + 1
-
-		statusStr := string(inst.Status)
-		statusColor := instanceStatusColors[inst.Status]
-
-		runnerStr := string(inst.RunnerStatus)
-		runnerColor := runnerStatusColors[inst.RunnerStatus]
-		if runnerStr == "" {
-			runnerStr = "-"
-			runnerColor = tcell.ColorGray
-		}
-
-		poolRef := inst.PoolID
-		if len(poolRef) > 8 {
-			poolRef = poolRef[:8]
-		}
-		if inst.ScaleSetID > 0 {
-			poolRef = fmt.Sprintf("ss-%d", inst.ScaleSetID)
-		}
-		if poolRef == "" {
-			poolRef = "-"
-		}
-
-		age := time.Since(inst.CreatedAt)
-		ageStr := formatDuration(age)
-
-		name := inst.Name
-		if name == "" {
-			name = inst.ID
-			if len(name) > 12 {
-				name = name[:12]
-			}
-		}
-
-		table.SetCell(r, 0, tview.NewTableCell(name).SetExpansion(1))
-		table.SetCell(r, 1, tview.NewTableCell(statusStr).SetTextColor(statusColor).SetExpansion(1))
-		table.SetCell(r, 2, tview.NewTableCell(runnerStr).SetTextColor(runnerColor).SetExpansion(1))
-		table.SetCell(r, 3, tview.NewTableCell(inst.ProviderName).SetExpansion(1))
-		table.SetCell(r, 4, tview.NewTableCell(string(inst.OSType)).SetExpansion(1))
-		table.SetCell(r, 5, tview.NewTableCell(poolRef).SetExpansion(1))
-		table.SetCell(r, 6, tview.NewTableCell(ageStr).SetExpansion(1))
-	}
-
-	if len(instances) == 0 {
-		table.SetCell(1, 0, tview.NewTableCell("No instances (waiting for events...)").
-			SetTextColor(tcell.ColorGray).SetExpansion(1))
-	}
-}
-
-func renderJobsTable(table *tview.Table, jobs []params.Job) {
-	table.Clear()
-
-	headers := []string{"NAME", "STATUS", "REPO", "RUNNER", "LABELS", "AGE"}
-	for i, h := range headers {
-		cell := tview.NewTableCell(h).
-			SetTextColor(tcell.ColorYellow).
-			SetSelectable(false).
-			SetExpansion(1)
-		table.SetCell(0, i, cell)
-	}
-
-	// Sort: in_progress first, then queued, then completed; within group by time desc
-	sorted := make([]params.Job, len(jobs))
-	copy(sorted, jobs)
-	sort.Slice(sorted, func(i, j int) bool {
-		si := jobStatusPriorities[sorted[i].Status]
-		sj := jobStatusPriorities[sorted[j].Status]
-		if si != sj {
-			return si < sj
-		}
-		return sorted[i].UpdatedAt.After(sorted[j].UpdatedAt)
-	})
-
-	for row, job := range sorted {
-		r := row + 1
-
-		statusStr := job.Status
-		statusColor := jobStatusColors[statusStr]
-		if job.Conclusion != "" && job.Status == jobCompleted {
-			statusStr = job.Conclusion
-			statusColor = jobConclusionColors[job.Conclusion]
-		}
-
-		repoStr := ""
-		if job.RepositoryOwner != "" && job.RepositoryName != "" {
-			repoStr = job.RepositoryOwner + "/" + job.RepositoryName
-		}
-
-		runnerStr := job.RunnerName
-		if runnerStr == "" {
-			runnerStr = "-"
-		}
-
-		labelsStr := ""
-		if len(job.Labels) > 0 {
-			labelsStr = truncateLabels(job.Labels, 30)
-		}
-
-		age := time.Since(job.CreatedAt)
-		ageStr := formatDuration(age)
-
-		name := job.Name
-		if len(name) > 40 {
-			name = name[:37] + "..."
-		}
-
-		table.SetCell(r, 0, tview.NewTableCell(name).SetExpansion(1))
-		table.SetCell(r, 1, tview.NewTableCell(statusStr).SetTextColor(statusColor).SetExpansion(1))
-		table.SetCell(r, 2, tview.NewTableCell(repoStr).SetExpansion(1))
-		table.SetCell(r, 3, tview.NewTableCell(runnerStr).SetExpansion(1))
-		table.SetCell(r, 4, tview.NewTableCell(labelsStr).SetExpansion(1))
-		table.SetCell(r, 5, tview.NewTableCell(ageStr).SetExpansion(1))
-	}
-
-	if len(jobs) == 0 {
-		table.SetCell(1, 0, tview.NewTableCell("No jobs (waiting for events...)").
-			SetTextColor(tcell.ColorGray).SetExpansion(1))
-	}
-}
-
-// --- Helpers ---
-
-func topPoolDisplayName(p metrics.MetricsPool) string {
-	entityName := p.RepoName
-	if entityName == "" {
-		entityName = p.OrgName
-	}
-	if entityName == "" {
-		entityName = p.EnterpriseName
-	}
-
-	shortID := p.ID
-	if len(shortID) > 8 {
-		shortID = shortID[:8]
-	}
-
-	if entityName != "" {
-		return entityName + " / " + shortID
-	}
-	return shortID
-}
-
-func sumCounts(counts map[string]int) int {
-	total := 0
-	for _, v := range counts {
-		total += v
-	}
-	return total
-}
-
-func formatDuration(d time.Duration) string {
-	if d < time.Minute {
-		return fmt.Sprintf("%ds", int(d.Seconds()))
-	}
-	if d < time.Hour {
-		return fmt.Sprintf("%dm", int(d.Minutes()))
-	}
-	if d < 24*time.Hour {
-		return fmt.Sprintf("%dh%dm", int(d.Hours()), int(d.Minutes())%60)
-	}
-	return fmt.Sprintf("%dd%dh", int(d.Hours())/24, int(d.Hours())%24)
-}
-
-// runnerStatusCategory maps runner statuses to summary bucket names.
-var runnerStatusCategory = map[params.RunnerStatus]string{
-	params.RunnerActive:     "active",
-	params.RunnerIdle:       "idle",
-	params.RunnerOnline:     "idle",
-	params.RunnerOffline:    "offline",
-	params.RunnerTerminated: "offline",
-	params.RunnerFailed:     "offline",
-	params.RunnerPending:    "pending",
-	params.RunnerInstalling: "pending",
-}
-
-var instanceStatusPriorities = map[commonParams.InstanceStatus]int{
-	commonParams.InstanceRunning:            0,
-	commonParams.InstancePendingCreate:      1,
-	commonParams.InstanceCreating:           1,
-	commonParams.InstanceStopped:            2,
-	commonParams.InstanceError:              3,
-	commonParams.InstancePendingDelete:      3,
-	commonParams.InstancePendingForceDelete: 3,
-	commonParams.InstanceDeleting:           3,
-}
-
-var instanceStatusColors = map[commonParams.InstanceStatus]tcell.Color{
-	commonParams.InstanceRunning:            tcell.ColorGreen,
-	commonParams.InstancePendingCreate:      tcell.ColorYellow,
-	commonParams.InstanceCreating:           tcell.ColorYellow,
-	commonParams.InstanceStopped:            tcell.ColorGray,
-	commonParams.InstanceError:              tcell.ColorRed,
-	commonParams.InstancePendingDelete:      tcell.ColorOrangeRed,
-	commonParams.InstancePendingForceDelete: tcell.ColorOrangeRed,
-	commonParams.InstanceDeleting:           tcell.ColorOrangeRed,
-}
-
-var runnerStatusColors = map[params.RunnerStatus]tcell.Color{
-	params.RunnerActive:     tcell.ColorGreen,
-	params.RunnerIdle:       tcell.ColorDodgerBlue,
-	params.RunnerOnline:     tcell.ColorDodgerBlue,
-	params.RunnerOffline:    tcell.ColorRed,
-	params.RunnerTerminated: tcell.ColorRed,
-	params.RunnerFailed:     tcell.ColorRed,
-	params.RunnerPending:    tcell.ColorYellow,
-	params.RunnerInstalling: tcell.ColorYellow,
-}
-
-var jobStatusPriorities = map[string]int{
-	jobInProgress: 0,
-	jobQueued:     1,
-	jobCompleted:  2,
-}
-
-var jobStatusColors = map[string]tcell.Color{
-	jobInProgress: tcell.ColorGreen,
-	jobQueued:     tcell.ColorYellow,
-	jobCompleted:  tcell.ColorGray,
-}
-
-var jobConclusionColors = map[string]tcell.Color{
-	"success":   tcell.ColorGreen,
-	"failure":   tcell.ColorRed,
-	"cancelled": tcell.ColorOrangeRed,
-	"timed_out": tcell.ColorRed,
-}
-
-func poolToMetrics(p params.Pool) metrics.MetricsPool {
-	return metrics.MetricsPool{
-		ID:                 p.ID,
-		ProviderName:       p.ProviderName,
-		OSType:             string(p.OSType),
-		MaxRunners:         p.MaxRunners,
-		Enabled:            p.Enabled,
-		RepoName:           p.RepoName,
-		OrgName:            p.OrgName,
-		EnterpriseName:     p.EnterpriseName,
-		RunnerCounts:       map[string]int{},
-		RunnerStatusCounts: map[string]int{},
-	}
-}
-
-func scaleSetToMetrics(ss params.ScaleSet) metrics.MetricsScaleSet {
-	return metrics.MetricsScaleSet{
-		ID:                 ss.ID,
-		Name:               ss.Name,
-		ProviderName:       ss.ProviderName,
-		OSType:             string(ss.OSType),
-		MaxRunners:         ss.MaxRunners,
-		Enabled:            ss.Enabled,
-		RepoName:           ss.RepoName,
-		OrgName:            ss.OrgName,
-		EnterpriseName:     ss.EnterpriseName,
-		RunnerCounts:       map[string]int{},
-		RunnerStatusCounts: map[string]int{},
-	}
-}
-
-func entityEventToMetrics(entityType string, payload json.RawMessage) metrics.MetricsEntity {
-	switch entityType {
-	case evtRepository:
-		var r params.Repository
-		if err := json.Unmarshal(payload, &r); err == nil && r.ID != "" {
-			name := r.Name
-			if r.Owner != "" {
-				name = r.Owner + "/" + r.Name
-			}
-			return metrics.MetricsEntity{
-				ID:       r.ID,
-				Name:     name,
-				Type:     evtRepository,
-				Endpoint: r.Endpoint.Name,
-				Healthy:  r.PoolManagerStatus.IsRunning,
-			}
-		}
-	case evtOrganization:
-		var o params.Organization
-		if err := json.Unmarshal(payload, &o); err == nil && o.ID != "" {
-			return metrics.MetricsEntity{
-				ID:       o.ID,
-				Name:     o.Name,
-				Type:     evtOrganization,
-				Endpoint: o.Endpoint.Name,
-				Healthy:  o.PoolManagerStatus.IsRunning,
-			}
-		}
-	case entityTypeEnterprise:
-		var e params.Enterprise
-		if err := json.Unmarshal(payload, &e); err == nil && e.ID != "" {
-			return metrics.MetricsEntity{
-				ID:       e.ID,
-				Name:     e.Name,
-				Type:     entityTypeEnterprise,
-				Endpoint: e.Endpoint.Name,
-				Healthy:  e.PoolManagerStatus.IsRunning,
-			}
-		}
-	}
-	return metrics.MetricsEntity{}
-}
-
-func truncateLabels(labels []string, maxLen int) string {
-	result := ""
-	for i, l := range labels {
-		if i > 0 {
-			result += ","
-		}
-		if len(result)+len(l) > maxLen {
-			result += "..."
-			break
-		}
-		result += l
-	}
-	return result
 }

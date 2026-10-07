@@ -92,6 +92,8 @@ func WithEntityPoolFilter(ghEntity params.ForgeEntity) dbCommon.PayloadFilterFun
 				return pool.OrgID == ghEntity.ID
 			case params.ForgeEntityTypeEnterprise:
 				return pool.EnterpriseID == ghEntity.ID
+			case params.ForgeEntityTypeInstance:
+				return pool.ForgeInstanceID == ghEntity.ID
 			default:
 				return false
 			}
@@ -162,6 +164,11 @@ func WithEntityFilter(entity params.ForgeEntity) dbCommon.PayloadFilterFunc {
 				return false
 			}
 			ent, ok = payload.Payload.(params.Enterprise)
+		case dbCommon.ForgeInstanceEntityType:
+			if entity.EntityType != params.ForgeEntityTypeInstance {
+				return false
+			}
+			ent, ok = payload.Payload.(params.ForgeInstance)
 		default:
 			return false
 		}
@@ -192,6 +199,10 @@ func WithEntityJobFilter(ghEntity params.ForgeEntity) dbCommon.PayloadFilterFunc
 				}
 			case params.ForgeEntityTypeEnterprise:
 				if job.EnterpriseID != nil && job.EnterpriseID.String() == ghEntity.ID {
+					return true
+				}
+			case params.ForgeEntityTypeInstance:
+				if job.ForgeInstanceID != nil && job.ForgeInstanceID.String() == ghEntity.ID {
 					return true
 				}
 			}

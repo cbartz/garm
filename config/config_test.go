@@ -15,15 +15,12 @@
 package config
 
 import (
-	"context"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 
-	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/stretchr/testify/require"
-	"golang.org/x/oauth2"
 
 	"github.com/cloudbase/garm/util/appdefaults"
 )
@@ -59,15 +56,6 @@ func getDefaultAPIServerConfig() APIServer {
 	}
 }
 
-func getMySQLDefaultConfig() MySQL {
-	return MySQL{
-		Username:     "test",
-		Password:     "test",
-		Hostname:     "127.0.0.1",
-		DatabaseName: "garm",
-	}
-}
-
 func getPostgresDefaultConfig() PostgreSQL {
 	return PostgreSQL{
 		Username: "test",
@@ -94,16 +82,6 @@ func getDefaultProvidersConfig() []Provider {
 	return []Provider{}
 }
 
-func getDefaultGithubConfig() []Github {
-	return []Github{
-		{
-			Name:        "dummy_creds",
-			Description: "dummy github credentials",
-			OAuth2Token: "bogus",
-		},
-	}
-}
-
 func getDefaultJWTCofig() JWTAuth {
 	return JWTAuth{
 		Secret:     EncryptionPassphrase,
@@ -123,7 +101,6 @@ func getDefaultConfig(t *testing.T) Config {
 		APIServer: getDefaultAPIServerConfig(),
 		Database:  getDefaultDatabaseConfig(dir),
 		Providers: getDefaultProvidersConfig(),
-		Github:    getDefaultGithubConfig(),
 		JWTAuth:   getDefaultJWTCofig(),
 	}
 }
@@ -365,24 +342,6 @@ func TestDatabaseConfig(t *testing.T) {
 			errString: "validating sqlite3 config: no valid db_file was specified",
 		},
 		{
-			name: "mysql backend is misconfigured",
-			cfg: Database{
-				DbBackend:  MySQLBackend,
-				MySQL:      MySQL{},
-				Passphrase: cfg.Passphrase,
-			},
-			errString: "validating mysql config: database, username, password, hostname are mandatory parameters for the database section",
-		},
-		{
-			name: "mysql backend is configured and valid",
-			cfg: Database{
-				DbBackend:  MySQLBackend,
-				MySQL:      getMySQLDefaultConfig(),
-				Passphrase: cfg.Passphrase,
-			},
-			errString: "",
-		},
-		{
 			name: "postgresql backend is misconfigured",
 			cfg: Database{
 				DbBackend:  PostgreSQLBackend,
@@ -434,17 +393,8 @@ func TestGormParams(t *testing.T) {
 	require.Equal(t, SQLiteBackend, dbType)
 	require.Equal(t, filepath.Join(dir, "garm.db?_journal_mode=WAL&_foreign_keys=ON&_txlock=immediate&_auto_vacuum=incremental&_busy_timeout=5000"), uri)
 
-	cfg.DbBackend = MySQLBackend
-	cfg.MySQL = getMySQLDefaultConfig()
-	cfg.SQLite = SQLite{}
-
-	dbType, uri, err = cfg.GormParams()
-	require.Nil(t, err)
-	require.Equal(t, MySQLBackend, dbType)
-	require.Equal(t, "test:test@tcp(127.0.0.1)/garm?charset=utf8&parseTime=True&loc=Local&timeout=5s", uri)
-
 	cfg.DbBackend = PostgreSQLBackend
-	cfg.MySQL = MySQL{}
+	cfg.SQLite = SQLite{}
 	cfg.PostgreSQL = getPostgresDefaultConfig()
 
 	dbType, uri, err = cfg.GormParams()
@@ -764,12 +714,12 @@ func TestNewConfig(t *testing.T) {
 	require.Equal(t, "0.0.0.0", cfg.APIServer.Bind)
 	require.Equal(t, 9998, cfg.APIServer.Port)
 	require.Equal(t, false, cfg.APIServer.UseTLS)
-	require.Equal(t, DBBackendType("mysql"), cfg.Database.DbBackend)
+	require.Equal(t, DBBackendType("postgresql"), cfg.Database.DbBackend)
 	require.Equal(t, "bocyasicgatEtenOubwonIbsudNutDom", cfg.Database.Passphrase)
-	require.Equal(t, "test", cfg.Database.MySQL.Username)
-	require.Equal(t, "test", cfg.Database.MySQL.Password)
-	require.Equal(t, "127.0.0.1", cfg.Database.MySQL.Hostname)
-	require.Equal(t, "garm", cfg.Database.MySQL.DatabaseName)
+	require.Equal(t, "test", cfg.Database.PostgreSQL.Username)
+	require.Equal(t, "test", cfg.Database.PostgreSQL.Password)
+	require.Equal(t, "127.0.0.1", cfg.Database.PostgreSQL.Hostname)
+	require.Equal(t, "garm", cfg.Database.PostgreSQL.Database)
 	require.Equal(t, "bocyasicgatEtenOubwonIbsudNutDom", cfg.JWTAuth.Secret)
 	require.Equal(t, timeToLive("48h"), cfg.JWTAuth.TimeToLive)
 }
@@ -786,375 +736,4 @@ func TestNewConfigInvalidConfig(t *testing.T) {
 	require.Nil(t, cfg)
 	require.NotNil(t, err)
 	require.Regexp(t, "validating config", err.Error())
-}
-
-func TestGithubConfig(t *testing.T) {
-	cfg := getDefaultGithubConfig()
-
-	tests := []struct {
-		name      string
-		cfg       Github
-		errString string
-	}{
-		{
-			name:      "Config is valid",
-			cfg:       cfg[0],
-			errString: "",
-		},
-		{
-			name: "BaseURL is invalid",
-			cfg: Github{
-				Name:        "dummy_creds",
-				Description: "dummy github credentials",
-				BaseURL:     "bogus",
-				AuthType:    GithubAuthTypePAT,
-				PAT: GithubPAT{
-					OAuth2Token: "bogus",
-				},
-			},
-			errString: "invalid base_url: parse.*",
-		},
-		{
-			name: "APIBaseURL is invalid",
-			cfg: Github{
-				Name:        "dummy_creds",
-				Description: "dummy github credentials",
-				APIBaseURL:  "bogus",
-				AuthType:    GithubAuthTypePAT,
-				PAT: GithubPAT{
-					OAuth2Token: "bogus",
-				},
-			},
-			errString: "invalid api_base_url: parse.*",
-		},
-		{
-			name: "UploadBaseURL is invalid",
-			cfg: Github{
-				Name:          "dummy_creds",
-				Description:   "dummy github credentials",
-				UploadBaseURL: "bogus",
-				AuthType:      GithubAuthTypePAT,
-				PAT: GithubPAT{
-					OAuth2Token: "bogus",
-				},
-			},
-			errString: "invalid upload_base_url: parse.*",
-		},
-		{
-			name: "BaseURL is set and is valid",
-			cfg: Github{
-				Name:        "dummy_creds",
-				Description: "dummy github credentials",
-				BaseURL:     "https://github.example.com/",
-				AuthType:    GithubAuthTypePAT,
-				PAT: GithubPAT{
-					OAuth2Token: "bogus",
-				},
-			},
-		},
-		{
-			name: "APIBaseURL is set and is valid",
-			cfg: Github{
-				Name:        "dummy_creds",
-				Description: "dummy github credentials",
-				APIBaseURL:  "https://github.example.com/api/v3",
-				AuthType:    GithubAuthTypePAT,
-				PAT: GithubPAT{
-					OAuth2Token: "bogus",
-				},
-			},
-		},
-		{
-			name: "UploadBaseURL is set and is valid",
-			cfg: Github{
-				Name:          "dummy_creds",
-				Description:   "dummy github credentials",
-				UploadBaseURL: "https://github.example.com/uploads",
-				AuthType:      GithubAuthTypePAT,
-				PAT: GithubPAT{
-					OAuth2Token: "bogus",
-				},
-			},
-		},
-		{
-			name: "OAuth2Token is empty",
-			cfg: Github{
-				Name:        "dummy_creds",
-				Description: "dummy github credentials",
-				OAuth2Token: "",
-			},
-			errString: "missing github oauth2 token",
-		},
-		{
-			name: "Name is empty",
-			cfg: Github{
-				Name:        "",
-				Description: "dummy github credentials",
-				OAuth2Token: "bogus",
-			},
-			errString: "missing credentials name",
-		},
-		{
-			name: "OAuth token is set in the PAT section",
-			cfg: Github{
-				Name:        "dummy_creds",
-				Description: "dummy github credentials",
-				OAuth2Token: "",
-				AuthType:    GithubAuthTypePAT,
-				PAT: GithubPAT{
-					OAuth2Token: "bogus",
-				},
-			},
-		},
-		{
-			name: "OAuth token is empty in the PAT section",
-			cfg: Github{
-				Name:        "dummy_creds",
-				Description: "dummy github credentials",
-				OAuth2Token: "",
-				AuthType:    GithubAuthTypePAT,
-				PAT: GithubPAT{
-					OAuth2Token: "",
-				},
-			},
-			errString: "missing github oauth2 token",
-		},
-		{
-			name: "Valid App section",
-			cfg: Github{
-				Name:        "dummy_creds",
-				Description: "dummy github credentials",
-				OAuth2Token: "",
-				AuthType:    GithubAuthTypeApp,
-				App: GithubApp{
-					AppID:          1,
-					InstallationID: 99,
-					PrivateKeyPath: "../testdata/certs/srv-key.pem",
-				},
-			},
-		},
-		{
-			name: "AppID is missing",
-			cfg: Github{
-				Name:        "dummy_creds",
-				Description: "dummy github credentials",
-				OAuth2Token: "",
-				AuthType:    GithubAuthTypeApp,
-				App: GithubApp{
-					AppID:          0,
-					InstallationID: 99,
-					PrivateKeyPath: "../testdata/certs/srv-key.pem",
-				},
-			},
-			errString: "missing app_id",
-		},
-		{
-			name: "InstallationID is missing",
-			cfg: Github{
-				Name:        "dummy_creds",
-				Description: "dummy github credentials",
-				OAuth2Token: "",
-				AuthType:    GithubAuthTypeApp,
-				App: GithubApp{
-					AppID:          1,
-					InstallationID: 0,
-					PrivateKeyPath: "../testdata/certs/srv-key.pem",
-				},
-			},
-			errString: "missing installation_id",
-		},
-		{
-			name: "PrivateKeyPath is missing",
-			cfg: Github{
-				Name:        "dummy_creds",
-				Description: "dummy github credentials",
-				OAuth2Token: "",
-				AuthType:    GithubAuthTypeApp,
-				App: GithubApp{
-					AppID:          1,
-					InstallationID: 99,
-					PrivateKeyPath: "",
-				},
-			},
-			errString: "missing private_key_path",
-		},
-		{
-			name: "PrivateKeyPath is invalid",
-			cfg: Github{
-				Name:        "dummy_creds",
-				Description: "dummy github credentials",
-				OAuth2Token: "",
-				AuthType:    GithubAuthTypeApp,
-				App: GithubApp{
-					AppID:          1,
-					InstallationID: 99,
-					PrivateKeyPath: "/i/dont/exist",
-				},
-			},
-			errString: "invalid github app config: error accessing private_key_path: stat /i/dont/exist: no such file or directory",
-		},
-		{
-			name: "PrivateKeyPath is not a valid RSA private key",
-			cfg: Github{
-				Name:        "dummy_creds",
-				Description: "dummy github credentials",
-				OAuth2Token: "",
-				AuthType:    GithubAuthTypeApp,
-				App: GithubApp{
-					AppID:          1,
-					InstallationID: 99,
-					PrivateKeyPath: "../testdata/certs/srv-pub.pem",
-				},
-			},
-			errString: "invalid github app config: parsing private_key_path: asn1: structure error:.*",
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.cfg.Validate()
-			if tc.errString == "" {
-				require.Nil(t, err)
-			} else {
-				require.NotNil(t, err)
-				require.Regexp(t, tc.errString, err.Error())
-			}
-		})
-	}
-}
-
-func TestGithubAPIEndpoint(t *testing.T) {
-	cfg := getDefaultGithubConfig()
-
-	require.Equal(t, "https://api.github.com/", cfg[0].APIEndpoint())
-}
-
-func TestGithubAPIEndpointIsSet(t *testing.T) {
-	cfg := getDefaultGithubConfig()
-	cfg[0].APIBaseURL = "https://github.example.com/api/v3"
-
-	require.Equal(t, "https://github.example.com/api/v3", cfg[0].APIEndpoint())
-}
-
-func TestUploadEndpoint(t *testing.T) {
-	cfg := getDefaultGithubConfig()
-
-	require.Equal(t, "https://uploads.github.com/", cfg[0].UploadEndpoint())
-}
-
-func TestUploadEndpointIsSet(t *testing.T) {
-	cfg := getDefaultGithubConfig()
-	cfg[0].UploadBaseURL = "https://github.example.com/uploads"
-
-	require.Equal(t, "https://github.example.com/uploads", cfg[0].UploadEndpoint())
-}
-
-func TestGithubBaseURL(t *testing.T) {
-	cfg := getDefaultGithubConfig()
-
-	require.Equal(t, "https://github.com", cfg[0].BaseEndpoint())
-}
-
-func TestGithubBaseURLIsSet(t *testing.T) {
-	cfg := getDefaultGithubConfig()
-	cfg[0].BaseURL = "https://github.example.com"
-
-	require.Equal(t, "https://github.example.com", cfg[0].BaseEndpoint())
-}
-
-func TestCACertBundle(t *testing.T) {
-	cfg := Github{
-		Name:             "dummy_creds",
-		Description:      "dummy github credentials",
-		OAuth2Token:      "bogus",
-		CACertBundlePath: "../testdata/certs/srv-pub.pem",
-	}
-
-	cert, err := cfg.CACertBundle()
-	require.Nil(t, err)
-	require.NotNil(t, cert)
-}
-
-func TestCACertBundleInvalidPath(t *testing.T) {
-	cfg := Github{
-		Name:             "dummy_creds",
-		Description:      "dummy github credentials",
-		OAuth2Token:      "bogus",
-		CACertBundlePath: "/i/dont/exist",
-	}
-
-	cert, err := cfg.CACertBundle()
-	require.NotNil(t, err)
-	require.EqualError(t, err, "error accessing ca_cert_bundle: stat /i/dont/exist: no such file or directory")
-	require.Nil(t, cert)
-}
-
-func TestCACertBundleInvalidFile(t *testing.T) {
-	cfg := Github{
-		Name:             "dummy_creds",
-		Description:      "dummy github credentials",
-		OAuth2Token:      "bogus",
-		CACertBundlePath: "../testdata/config.toml",
-	}
-
-	cert, err := cfg.CACertBundle()
-	require.NotNil(t, err)
-	require.EqualError(t, err, "failed to parse CA cert bundle")
-	require.Nil(t, cert)
-}
-
-func TestGithubHTTPClientDeprecatedPAT(t *testing.T) {
-	cfg := Github{
-		Name:        "dummy_creds",
-		Description: "dummy github credentials",
-		OAuth2Token: "bogus",
-	}
-
-	client, err := cfg.HTTPClient(context.Background())
-	require.Nil(t, err)
-	require.NotNil(t, client)
-
-	transport, ok := client.Transport.(*oauth2.Transport)
-	require.True(t, ok)
-	require.NotNil(t, transport)
-}
-
-func TestGithubHTTPClientPAT(t *testing.T) {
-	cfg := Github{
-		Name:        "dummy_creds",
-		Description: "dummy github credentials",
-		AuthType:    GithubAuthTypePAT,
-		PAT: GithubPAT{
-			OAuth2Token: "bogus",
-		},
-	}
-
-	client, err := cfg.HTTPClient(context.Background())
-	require.Nil(t, err)
-	require.NotNil(t, client)
-
-	transport, ok := client.Transport.(*oauth2.Transport)
-	require.True(t, ok)
-	require.NotNil(t, transport)
-}
-
-func TestGithubHTTPClientApp(t *testing.T) {
-	cfg := Github{
-		Name:        "dummy_creds",
-		Description: "dummy github credentials",
-		AuthType:    GithubAuthTypeApp,
-		App: GithubApp{
-			AppID:          1,
-			InstallationID: 99,
-			PrivateKeyPath: "../testdata/certs/srv-key.pem",
-		},
-	}
-
-	client, err := cfg.HTTPClient(context.Background())
-	require.Nil(t, err)
-	require.NotNil(t, client)
-
-	transport, ok := client.Transport.(*ghinstallation.Transport)
-	require.True(t, ok)
-	require.NotNil(t, transport)
 }

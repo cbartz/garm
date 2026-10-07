@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -26,6 +27,8 @@ import (
 	commonParams "github.com/cloudbase/garm-provider-common/params"
 	"github.com/cloudbase/garm/cache"
 	dbCommon "github.com/cloudbase/garm/database/common"
+	garmErrors "github.com/cloudbase/garm/internal/errors"
+	"github.com/cloudbase/garm/metrics"
 	"github.com/cloudbase/garm/params"
 	"github.com/cloudbase/garm/runner/common"
 	garmUtil "github.com/cloudbase/garm/util"
@@ -72,9 +75,16 @@ type instanceManager struct {
 	deleteBackoff time.Duration
 
 	updates chan dbCommon.ChangePayload
-	mux     sync.Mutex
-	running atomic.Bool
-	quit    chan struct{}
+	// mux guards i.instance. It must only be held for short reads and writes,
+	// never across provider calls.
+	mux sync.Mutex
+	// consolidateMux serializes consolidateState() invocations. Provider
+	// operations can take minutes and cannot be canceled once started, so
+	// consolidation works on a snapshot of the instance while updates continue
+	// to land on i.instance under mux.
+	consolidateMux sync.Mutex
+	running        atomic.Bool
+	quit           chan struct{}
 }
 
 func (i *instanceManager) Start() error {
@@ -148,8 +158,9 @@ func (i *instanceManager) getEntity() (params.ForgeEntity, error) {
 }
 
 func (i *instanceManager) pseudoPoolID() string {
-	// This is temporary. We need to extend providers to know about scale sets.
-	return fmt.Sprintf("%s-%s", i.scaleSet.Name, i.scaleSetEntity.ID)
+	// nolint:golangci-lint,godox
+	// TODO(gabriel-samfira): extend providers to know about scale sets.
+	return garmUtil.ScaleSetPseudoPoolID(i.scaleSetEntity.ID, i.scaleSet.ID)
 }
 
 func (i *instanceManager) handleCreateInstanceInProvider(instance params.Instance) error {
@@ -203,6 +214,15 @@ func (i *instanceManager) handleCreateInstanceInProvider(instance params.Instanc
 		GitHubRunnerGroup: i.scaleSet.GitHubRunnerGroup,
 		JitConfigEnabled:  true,
 	}
+
+	if i.scaleSet.ProxyID != 0 {
+		proxy, ok := cache.GetProxy(i.scaleSet.ProxyID)
+		if !ok {
+			return fmt.Errorf("proxy %d (%s) set on scale set %d was not found in cache", i.scaleSet.ProxyID, i.scaleSet.ProxyName, i.scaleSet.ID)
+		}
+		bootstrapArgs.ProxyConfig = proxy.ProxyConfig()
+	}
+
 	// We use the template management system unless:
 	//   * there is no template associated with the pool/scale set
 	//   * user explicitly overwrites the install template via extra specs
@@ -237,7 +257,15 @@ func (i *instanceManager) handleCreateInstanceInProvider(instance params.Instanc
 		},
 	}
 
-	providerInstance, err := i.provider.CreateInstance(i.ctx, bootstrapArgs, createInstanceParams)
+	// Bound the create call by the scale set's bootstrap timeout. Past that
+	// point the runner is considered failed anyway, and reaping skips
+	// instances in creating, so allowing the provider call to outlive the
+	// bootstrap timeout would leave the instance stuck until the binary
+	// resolved on its own. The provider-level exec timeout (if configured and
+	// smaller) still applies; the effective deadline is whichever is sooner.
+	createCtx, cancel := context.WithTimeout(i.ctx, time.Duration(i.scaleSet.RunnerTimeout())*time.Minute)
+	defer cancel()
+	providerInstance, err := i.provider.CreateInstance(createCtx, bootstrapArgs, createInstanceParams)
 	if err != nil {
 		instanceIDToDelete = instance.Name
 		return fmt.Errorf("creating instance in provider: %w", err)
@@ -250,11 +278,20 @@ func (i *instanceManager) handleCreateInstanceInProvider(instance params.Instanc
 		}
 	}
 
-	updated, err := i.helper.updateArgsFromProviderInstance(instance.Name, providerInstance)
+	updated, err := i.helper.persistProviderInstanceState(instance.Name, providerInstance)
 	if err != nil {
 		return fmt.Errorf("updating instance args: %w", err)
 	}
-	i.instance = updated
+
+	// A newer update (like a user requested force delete) may have landed on
+	// i.instance while the provider call was in flight. Overwriting it would
+	// revert state that no future event will re-deliver, so only store the
+	// result of our own DB write if the cached instance is not newer.
+	i.mux.Lock()
+	if !i.instance.UpdatedAt.After(updated.UpdatedAt) {
+		i.instance = updated
+	}
+	i.mux.Unlock()
 
 	return nil
 }
@@ -267,6 +304,9 @@ func (i *instanceManager) getProviderBaseParams() (common.ProviderBaseParams, er
 
 	return common.ProviderBaseParams{
 		ControllerInfo: info,
+		EntityType:     i.scaleSetEntity.EntityType,
+		EntityID:       i.scaleSetEntity.ID,
+		ScaleSetID:     i.scaleSet.ID,
 	}, nil
 }
 
@@ -300,32 +340,69 @@ func (i *instanceManager) handleDeleteInstanceInProvider(instance params.Instanc
 	return nil
 }
 
+// recordLifecycleEvent counts a runner removal decision made by this manager,
+// by outcome. The entity String() form is used for the owner label; a bare
+// repo name would be ambiguous across owners.
+func (i *instanceManager) recordLifecycleEvent(outcome string) {
+	var owner string
+	if cachedEntity, ok := cache.GetEntity(i.scaleSetEntity.ID); ok {
+		owner = cachedEntity.String()
+	}
+	metrics.RunnerLifecycleCount.WithLabelValues(
+		outcome,                           // label: outcome
+		i.scaleSet.ProviderName,           // label: provider
+		owner,                             // label: pool_owner
+		string(i.scaleSet.ScaleSetType()), // label: pool_type
+		"",                                // label: pool_id
+		strconv.FormatUint(uint64(i.scaleSet.ID), 10), // label: scaleset_id
+	).Inc()
+}
+
 func (i *instanceManager) consolidateState() error {
-	i.mux.Lock()
-	defer i.mux.Unlock()
+	i.consolidateMux.Lock()
+	defer i.consolidateMux.Unlock()
 
 	if !i.running.Load() {
 		return nil
 	}
 
-	switch i.instance.Status {
+	// Work on a snapshot of the instance. Provider operations can take a long
+	// time and cannot be canceled once started, and holding i.mux for the
+	// duration of this function would block handleUpdate(). Updates land on
+	// i.instance while we run; the next consolidation acts on the new state.
+	i.mux.Lock()
+	instance := i.instance
+	i.mux.Unlock()
+
+	switch instance.Status {
 	case commonParams.InstancePendingCreate:
 		// kick off the creation process
-		if err := i.helper.SetInstanceStatus(i.instance.Name, commonParams.InstanceCreating, nil, false); err != nil {
+		if err := i.helper.SetInstanceStatus(instance.Name, commonParams.InstanceCreating, nil, false); err != nil {
 			return fmt.Errorf("setting instance status to creating: %w", err)
 		}
-		if err := i.handleCreateInstanceInProvider(i.instance); err != nil {
+		if err := i.handleCreateInstanceInProvider(instance); err != nil {
 			slog.ErrorContext(i.ctx, "creating instance in provider", "error", err)
-			if err := i.helper.SetInstanceStatus(i.instance.Name, commonParams.InstanceError, []byte(err.Error()), true); err != nil {
+			i.recordLifecycleEvent(metrics.OutcomeProviderError)
+			if err := i.helper.SetInstanceStatus(instance.Name, commonParams.InstanceError, []byte(err.Error()), true); err != nil {
 				return fmt.Errorf("setting instance status to error: %w", err)
 			}
 		}
 	case commonParams.InstanceRunning:
 		// Nothing to do. The provider finished creating the instance.
-	case commonParams.InstancePendingDelete, commonParams.InstancePendingForceDelete:
+	case commonParams.InstancePendingDelete, commonParams.InstancePendingForceDelete, commonParams.InstanceDeleting:
 		// Remove or force remove the runner. When force remove is specified, we ignore
 		// IaaS errors.
-		if i.instance.Status == commonParams.InstancePendingDelete {
+		//
+		// InstanceDeleting is an interrupted delete. Restarts are recovered
+		// by the scale set worker on startup (deleting is moved back to
+		// pending_delete), but the manager can strand its own cached state
+		// here at runtime: a pass that errors out after setting deleting but
+		// before recording the outcome (the deleted write or the
+		// pending_delete requeue fails transiently) leaves the cached status
+		// at deleting with no further event to move it. Providers report a
+		// missing instance as success, so re-driving the delete is safe.
+		forced := instance.Status == commonParams.InstancePendingForceDelete
+		if !forced {
 			// invoke backoff sleep. We only do this for non forced removals,
 			// as force delete will always return, regardless of whether or not
 			// the remove operation succeeded in the provider. A user may decide
@@ -336,27 +413,38 @@ func (i *instanceManager) consolidateState() error {
 			}
 		}
 
-		prevStatus := i.instance.Status
-		if err := i.helper.SetInstanceStatus(i.instance.Name, commonParams.InstanceDeleting, nil, true); err != nil {
+		if err := i.helper.SetInstanceStatus(instance.Name, commonParams.InstanceDeleting, nil, true); err != nil {
 			if errors.Is(err, runnerErrors.ErrNotFound) {
 				return nil
 			}
 			return fmt.Errorf("setting instance status to deleting: %w", err)
 		}
 
-		if err := i.handleDeleteInstanceInProvider(i.instance); err != nil {
-			slog.ErrorContext(i.ctx, "deleting instance in provider", "error", err, "forced", i.instance.Status == commonParams.InstancePendingForceDelete)
-			if prevStatus == commonParams.InstancePendingDelete {
+		if err := i.handleDeleteInstanceInProvider(instance); err != nil {
+			slog.ErrorContext(i.ctx, "deleting instance in provider", "error", err, "forced", forced)
+			if !forced {
 				i.incrementBackOff()
-				if err := i.helper.SetInstanceStatus(i.instance.Name, commonParams.InstancePendingDelete, []byte(err.Error()), true); err != nil {
+				if err := i.helper.SetInstanceStatus(instance.Name, commonParams.InstancePendingDelete, []byte(err.Error()), true); err != nil {
 					return fmt.Errorf("setting instance status to error: %w", err)
 				}
 
 				return fmt.Errorf("error removing instance. Will retry: %w", err)
 			}
 		}
-		if err := i.helper.SetInstanceStatus(i.instance.Name, commonParams.InstanceDeleted, nil, false); err != nil {
-			if !errors.Is(err, runnerErrors.ErrNotFound) {
+		if err := i.helper.SetInstanceStatus(instance.Name, commonParams.InstanceDeleted, nil, false); err != nil {
+			var te *runnerErrors.InstanceTransitionError
+			switch {
+			case errors.Is(err, runnerErrors.ErrNotFound):
+				// The record is already gone.
+			case errors.As(err, &te) && garmErrors.InstanceIsBeingDeleted(te.From):
+				// The row moved elsewhere on the deletion lane while the
+				// provider delete ran. The provider resource is confirmed
+				// gone at this point, so force the terminal state instead of
+				// re-driving a delete against nothing.
+				if err := i.helper.SetInstanceStatus(instance.Name, commonParams.InstanceDeleted, nil, true); err != nil && !errors.Is(err, runnerErrors.ErrNotFound) {
+					return fmt.Errorf("setting instance status to deleted: %w", err)
+				}
+			default:
 				return fmt.Errorf("setting instance status to deleted: %w", err)
 			}
 		}
@@ -364,7 +452,7 @@ func (i *instanceManager) consolidateState() error {
 	case commonParams.InstanceError:
 		// Instance is in error state. We wait for next status or potentially retry
 		// spawning the instance with a backoff timer.
-		if err := i.helper.SetInstanceStatus(i.instance.Name, commonParams.InstancePendingDelete, nil, true); err != nil {
+		if err := i.helper.SetInstanceStatus(instance.Name, commonParams.InstancePendingDelete, nil, true); err != nil {
 			return fmt.Errorf("setting instance status to error: %w", err)
 		}
 	case commonParams.InstanceDeleted:

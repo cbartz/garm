@@ -67,6 +67,15 @@ type EnterpriseStore interface {
 	UpdateEnterprise(ctx context.Context, enterpriseID string, param params.UpdateEntityParams) (params.Enterprise, error)
 }
 
+type ForgeInstanceStore interface {
+	CreateForgeInstance(ctx context.Context, endpointName string, credentials params.ForgeCredentials, webhookSecret string, poolBalancerType params.PoolBalancerType, agentMode bool) (params.ForgeInstance, error)
+	GetForgeInstance(ctx context.Context, endpointName string) (params.ForgeInstance, error)
+	GetForgeInstanceByID(ctx context.Context, forgeInstanceID string) (params.ForgeInstance, error)
+	ListForgeInstances(ctx context.Context, filter params.ForgeInstanceFilter) ([]params.ForgeInstance, error)
+	DeleteForgeInstance(ctx context.Context, forgeInstanceID string) error
+	UpdateForgeInstance(ctx context.Context, forgeInstanceID string, param params.UpdateEntityParams) (params.ForgeInstance, error)
+}
+
 type PoolStore interface {
 	// Probably a bad idea without some king of filter or at least pagination
 	// nolint:golangci-lint,godox
@@ -146,7 +155,7 @@ type ControllerStore interface {
 	InitController() (params.ControllerInfo, error)
 	UpdateController(info params.UpdateControllerParams) (params.ControllerInfo, error)
 	HasEntitiesWithAgentModeEnabled() (bool, error)
-	UpdateCachedGARMAgentRelease(releaseData []byte, fetchedAt time.Time) error
+	UpdateCachedGARMAgentReleases(index []byte, fetchedAt time.Time) error
 }
 
 type ScaleSetsStore interface {
@@ -191,6 +200,15 @@ type TemplateStore interface {
 	DeleteTemplate(ctx context.Context, id uint) (err error)
 }
 
+type ProxyStore interface {
+	ListProxies(ctx context.Context) ([]params.Proxy, error)
+	CreateProxy(ctx context.Context, param params.CreateProxyParams) (proxy params.Proxy, err error)
+	GetProxy(ctx context.Context, id uint) (params.Proxy, error)
+	GetProxyByName(ctx context.Context, name string) (params.Proxy, error)
+	UpdateProxy(ctx context.Context, id uint, param params.UpdateProxyParams) (proxy params.Proxy, err error)
+	DeleteProxy(ctx context.Context, id uint) (err error)
+}
+
 type FileObjectStore interface {
 	ListFileObjects(ctx context.Context, page, pageSize uint64) (params.FileObjectPaginatedResponse, error)
 	SearchFileObjectByTags(ctx context.Context, tags []string, page, pageSize uint64) (params.FileObjectPaginatedResponse, error)
@@ -207,6 +225,7 @@ type Store interface {
 	RepoStore
 	OrgStore
 	EnterpriseStore
+	ForgeInstanceStore
 	PoolStore
 	UserStore
 	InstanceStore
@@ -220,6 +239,7 @@ type Store interface {
 	GiteaEndpointStore
 	GiteaCredentialsStore
 	TemplateStore
+	ProxyStore
 	FileObjectStore
 
 	ControllerInfo() (params.ControllerInfo, error)

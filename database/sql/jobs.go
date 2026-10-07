@@ -60,6 +60,7 @@ func sqlWorkflowJobToParamsJob(job WorkflowJob) (params.Job, error) {
 		RepoID:          job.RepoID,
 		OrgID:           job.OrgID,
 		EnterpriseID:    job.EnterpriseID,
+		ForgeInstanceID: job.ForgeInstanceID,
 		Labels:          labels,
 		CreatedAt:       job.CreatedAt,
 		UpdatedAt:       job.UpdatedAt,
@@ -98,6 +99,7 @@ func (s *sqlDatabase) paramsJobToWorkflowJob(ctx context.Context, conn *gorm.DB,
 		RepoID:          job.RepoID,
 		OrgID:           job.OrgID,
 		EnterpriseID:    job.EnterpriseID,
+		ForgeInstanceID: job.ForgeInstanceID,
 		Labels:          asJSON,
 		LockedBy:        job.LockedBy,
 	}
@@ -355,6 +357,9 @@ func (s *sqlDatabase) CreateOrUpdateJob(ctx context.Context, job params.Job) (pa
 			if job.EnterpriseID != nil {
 				workflowJob.EnterpriseID = job.EnterpriseID
 			}
+			if job.ForgeInstanceID != nil {
+				workflowJob.ForgeInstanceID = job.ForgeInstanceID
+			}
 			if err := tx.Save(&workflowJob).Error; err != nil {
 				return fmt.Errorf("error saving job: %w", err)
 			}
@@ -429,6 +434,8 @@ func (s *sqlDatabase) ListEntityJobsByStatus(_ context.Context, entityType param
 		query = query.Where("repo_id = ?", u)
 	case params.ForgeEntityTypeEnterprise:
 		query = query.Where("enterprise_id = ?", u)
+	case params.ForgeEntityTypeInstance:
+		query = query.Where("forge_instance_id = ?", u)
 	}
 
 	if err := query.Find(&jobs); err.Error != nil {

@@ -5,12 +5,14 @@ import type {
 	Repository,
 	Organization,
 	Enterprise,
+	ForgeInstance,
 	Pool,
 	ScaleSet,
 	ForgeCredentials,
 	ForgeEndpoint,
 	ControllerInfo,
-	Template
+	Template,
+	Proxy
 } from '../api/generated/api.js';
 
 type CacheResourceKey = keyof Omit<EagerCacheState, 'loading' | 'loaded' | 'errorMessages'>;
@@ -19,44 +21,52 @@ interface EagerCacheState {
 	repositories: Repository[];
 	organizations: Organization[];
 	enterprises: Enterprise[];
+	forgeInstances: ForgeInstance[];
 	pools: Pool[];
 	scalesets: ScaleSet[];
 	credentials: ForgeCredentials[];
 	endpoints: ForgeEndpoint[];
 	controllerInfo: ControllerInfo | null;
 	templates: Template[];
+	proxies: Proxy[];
 	loading: {
 		repositories: boolean;
 		organizations: boolean;
 		enterprises: boolean;
+		forgeInstances: boolean;
 		pools: boolean;
 		scalesets: boolean;
 		credentials: boolean;
 		endpoints: boolean;
 		controllerInfo: boolean;
 		templates: boolean;
+		proxies: boolean;
 	};
 	loaded: {
 		repositories: boolean;
 		organizations: boolean;
 		enterprises: boolean;
+		forgeInstances: boolean;
 		pools: boolean;
 		scalesets: boolean;
 		credentials: boolean;
 		endpoints: boolean;
 		controllerInfo: boolean;
 		templates: boolean;
+		proxies: boolean;
 	};
 	errorMessages: {
 		repositories: string;
 		organizations: string;
 		enterprises: string;
+		forgeInstances: string;
 		pools: string;
 		scalesets: string;
 		credentials: string;
 		endpoints: string;
 		controllerInfo: string;
 		templates: string;
+		proxies: string;
 	};
 }
 
@@ -64,44 +74,52 @@ const initialState: EagerCacheState = {
 	repositories: [],
 	organizations: [],
 	enterprises: [],
+	forgeInstances: [],
 	pools: [],
 	scalesets: [],
 	credentials: [],
 	endpoints: [],
 	controllerInfo: null,
 	templates: [],
+	proxies: [],
 	loading: {
 		repositories: false,
 		organizations: false,
 		enterprises: false,
+		forgeInstances: false,
 		pools: false,
 		scalesets: false,
 		credentials: false,
 		endpoints: false,
 		controllerInfo: false,
 		templates: false,
+		proxies: false,
 	},
 	loaded: {
 		repositories: false,
 		organizations: false,
 		enterprises: false,
+		forgeInstances: false,
 		pools: false,
 		scalesets: false,
 		credentials: false,
 		endpoints: false,
 		controllerInfo: false,
 		templates: false,
+		proxies: false,
 	},
 	errorMessages: {
 		repositories: '',
 		organizations: '',
 		enterprises: '',
+		forgeInstances: '',
 		pools: '',
 		scalesets: '',
 		credentials: '',
 		endpoints: '',
 		controllerInfo: '',
 		templates: '',
+		proxies: '',
 	}
 };
 
@@ -112,12 +130,14 @@ const apiFetchers: Record<CacheResourceKey, () => Promise<any>> = {
 	repositories: () => garmApi.listRepositories(),
 	organizations: () => garmApi.listOrganizations(),
 	enterprises: () => garmApi.listEnterprises(),
+	forgeInstances: () => garmApi.listForgeInstances(),
 	pools: () => garmApi.listAllPools(),
 	scalesets: () => garmApi.listScaleSets(),
 	credentials: () => garmApi.listAllCredentials(),
 	endpoints: () => garmApi.listAllEndpoints(),
 	controllerInfo: () => garmApi.getControllerInfo(),
 	templates: () => garmApi.listTemplates(),
+	proxies: () => garmApi.listProxies(),
 };
 
 class EagerCacheManager {
@@ -229,9 +249,11 @@ class EagerCacheManager {
 			websocketStore.subscribeToEntity('repository', ['create', 'update', 'delete'], (e) => this.handleCrudEvent(e, 'repositories')),
 			websocketStore.subscribeToEntity('organization', ['create', 'update', 'delete'], (e) => this.handleCrudEvent(e, 'organizations')),
 			websocketStore.subscribeToEntity('enterprise', ['create', 'update', 'delete'], (e) => this.handleCrudEvent(e, 'enterprises')),
+			websocketStore.subscribeToEntity('forge_instance', ['create', 'update', 'delete'], (e) => this.handleCrudEvent(e, 'forgeInstances')),
 			websocketStore.subscribeToEntity('pool', ['create', 'update', 'delete'], (e) => this.handleCrudEvent(e, 'pools')),
 			websocketStore.subscribeToEntity('scaleset', ['create', 'update', 'delete'], (e) => this.handleCrudEvent(e, 'scalesets')),
 			websocketStore.subscribeToEntity('template', ['create', 'update', 'delete'], (e) => this.handleCrudEvent(e, 'templates')),
+			websocketStore.subscribeToEntity('proxy', ['create', 'update', 'delete'], (e) => this.handleCrudEvent(e, 'proxies')),
 			websocketStore.subscribeToEntity('controller', ['update'], this.handleControllerEvent.bind(this)),
 			websocketStore.subscribeToEntity('github_credentials', ['create', 'update', 'delete'], this.handleCredentialsEvent.bind(this)),
 			websocketStore.subscribeToEntity('gitea_credentials', ['create', 'update', 'delete'], this.handleCredentialsEvent.bind(this)),
@@ -402,6 +424,10 @@ class EagerCacheManager {
 		return this.getCachedOrFetch('enterprises', 'enterprises');
 	}
 
+	async getForgeInstances(): Promise<ForgeInstance[]> {
+		return this.getCachedOrFetch('forgeInstances', 'forge instances');
+	}
+
 	async getPools(): Promise<Pool[]> {
 		return this.getCachedOrFetch('pools', 'pools');
 	}
@@ -424,6 +450,10 @@ class EagerCacheManager {
 
 	async getTemplates(): Promise<Template[]> {
 		return this.getCachedOrFetch('templates', 'templates');
+	}
+
+	async getProxies(): Promise<Proxy[]> {
+		return this.getCachedOrFetch('proxies', 'proxies');
 	}
 }
 

@@ -20,6 +20,7 @@ import (
 	"encoding/pem"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
@@ -31,6 +32,7 @@ const (
 	DefaultRunnerPrefix string = "garm"
 	httpsScheme         string = "https"
 	httpScheme          string = "http"
+	socks5Scheme        string = "socks5"
 )
 
 type InstanceRequest struct {
@@ -147,6 +149,39 @@ func (c *CreateEnterpriseParams) Validate() error {
 	return nil
 }
 
+// swagger:model CreateForgeInstanceParams
+type CreateForgeInstanceParams struct {
+	EndpointName     string           `json:"endpoint_name,omitempty"`
+	CredentialsName  string           `json:"credentials_name,omitempty"`
+	WebhookSecret    string           `json:"webhook_secret,omitempty"`
+	ForgeType        EndpointType     `json:"forge_type,omitempty"`
+	PoolBalancerType PoolBalancerType `json:"pool_balancer_type,omitempty"`
+	AgentMode        bool             `json:"agent_mode,omitempty"`
+}
+
+func (c *CreateForgeInstanceParams) Validate() error {
+	if c.EndpointName == "" {
+		return runnerErrors.NewBadRequestError("missing endpoint name")
+	}
+	if c.CredentialsName == "" {
+		return runnerErrors.NewBadRequestError("missing credentials name")
+	}
+	if c.WebhookSecret == "" {
+		return runnerErrors.NewBadRequestError("missing webhook secret")
+	}
+
+	if !c.ForgeType.SupportsInstancePools() {
+		return runnerErrors.NewBadRequestError("forge type %q does not support instance-level pools", c.ForgeType)
+	}
+
+	switch c.PoolBalancerType {
+	case PoolBalancerTypeRoundRobin, PoolBalancerTypePack, PoolBalancerTypeNone:
+	default:
+		return runnerErrors.NewBadRequestError("invalid pool balancer type")
+	}
+	return nil
+}
+
 // NewUserParams holds the needed information to create
 // a new user
 // swagger:model NewUserParams
@@ -180,6 +215,9 @@ type UpdatePoolParams struct {
 	GitHubRunnerGroup *string `json:"github-runner-group,omitempty"`
 	Priority          *uint   `json:"priority,omitempty"`
 	TemplateID        *uint   `json:"template_id,omitempty"`
+	// ProxyID is the ID of the proxy definition runners in this pool will
+	// use. Setting it to 0 removes the proxy from the pool.
+	ProxyID *uint `json:"proxy_id,omitempty"`
 }
 
 type CreateInstanceParams struct {
@@ -222,6 +260,8 @@ type CreatePoolParams struct {
 	GitHubRunnerGroup string `json:"github-runner-group,omitempty"`
 	Priority          uint   `json:"priority,omitempty"`
 	TemplateID        *uint  `json:"template_id,omitempty"`
+	// ProxyID is the ID of the proxy definition runners in this pool will use.
+	ProxyID *uint `json:"proxy_id,omitempty"`
 }
 
 func (p *CreatePoolParams) Validate() error {
@@ -262,15 +302,16 @@ type UpdateInstanceParams struct {
 	// for this instance.
 	Addresses []commonParams.Address `json:"addresses,omitempty"`
 	// Status is the status of the instance inside the provider (eg: running, stopped, etc)
-	Status           commonParams.InstanceStatus `json:"status,omitempty"`
-	RunnerStatus     RunnerStatus                `json:"runner_status,omitempty"`
-	ProviderFault    []byte                      `json:"provider_fault,omitempty"`
-	Heartbeat        *time.Time                  `json:"heartbeat,omitempty"`
-	AgentID          int64                       `json:"-"`
-	CreateAttempt    int                         `json:"-"`
-	TokenFetched     *bool                       `json:"-"`
-	JitConfiguration map[string]string           `json:"-"`
-	Capabilities     *AgentCapabilities          `json:"-"`
+	Status       commonParams.InstanceStatus `json:"status,omitempty"`
+	RunnerStatus RunnerStatus                `json:"runner_status,omitempty"`
+	// swagger:strfmt byte
+	ProviderFault    []byte             `json:"provider_fault,omitempty"`
+	Heartbeat        *time.Time         `json:"heartbeat,omitempty"`
+	AgentID          int64              `json:"-"`
+	CreateAttempt    int                `json:"-"`
+	TokenFetched     *bool              `json:"-"`
+	JitConfiguration map[string]string  `json:"-"`
+	Capabilities     *AgentCapabilities `json:"-"`
 }
 
 type UpdateUserParams struct {
@@ -318,7 +359,8 @@ type CreateGithubEndpointParams struct {
 	APIBaseURL    string `json:"api_base_url,omitempty"`
 	UploadBaseURL string `json:"upload_base_url,omitempty"`
 	BaseURL       string `json:"base_url,omitempty"`
-	CACertBundle  []byte `json:"ca_cert_bundle,omitempty"`
+	// swagger:strfmt byte
+	CACertBundle []byte `json:"ca_cert_bundle,omitempty"`
 }
 
 func (c CreateGithubEndpointParams) Validate() error {
@@ -385,7 +427,8 @@ type UpdateGithubEndpointParams struct {
 	APIBaseURL    *string `json:"api_base_url,omitempty"`
 	UploadBaseURL *string `json:"upload_base_url,omitempty"`
 	BaseURL       *string `json:"base_url,omitempty"`
-	CACertBundle  []byte  `json:"ca_cert_bundle,omitempty"`
+	// swagger:strfmt byte
+	CACertBundle []byte `json:"ca_cert_bundle,omitempty"`
 }
 
 func (u UpdateGithubEndpointParams) Validate() error {
@@ -445,8 +488,9 @@ type GithubPAT struct {
 
 // swagger:model GithubApp
 type GithubApp struct {
-	AppID           int64  `json:"app_id,omitempty"`
-	InstallationID  int64  `json:"installation_id,omitempty"`
+	AppID          int64 `json:"app_id,omitempty"`
+	InstallationID int64 `json:"installation_id,omitempty"`
+	// swagger:strfmt byte
 	PrivateKeyBytes []byte `json:"private_key_bytes,omitempty"`
 }
 
@@ -476,6 +520,12 @@ func (g GithubApp) Validate() error {
 	return nil
 }
 
+// MaxReserveUsagePercentage is the highest allowed value for
+// ReserveUsagePercentage. Reserving more than half of the quota for
+// critical operations leaves too little for normal operations and
+// effectively breaks scaling.
+const MaxReserveUsagePercentage = 50
+
 // swagger:model CreateGithubCredentialsParams
 type CreateGithubCredentialsParams struct {
 	Name        string        `json:"name,omitempty"`
@@ -484,6 +534,16 @@ type CreateGithubCredentialsParams struct {
 	AuthType    ForgeAuthType `json:"auth_type,omitempty"`
 	PAT         GithubPAT     `json:"pat,omitempty"`
 	App         GithubApp     `json:"app,omitempty"`
+
+	// ReserveUsageEnabled toggles whether or not to allocate a certain
+	// percentage of the available rate limit to critical operations such
+	// as delete operations for runners that have finished their jobs.
+	ReserveUsageEnabled bool `json:"reserve_usage_enabled,omitempty"`
+	// ReserveUsagePercentage is the percentage of available rate limit reserved
+	// for critical operations. Setting this value too high will negatively impact
+	// normal operations, so it is capped at 50%. A value between 5% and 20%
+	// should be safe on most setups. Adjust this based on your usage patterns.
+	ReserveUsagePercentage int `json:"reserve_usage_percentage,omitempty"`
 }
 
 func (c CreateGithubCredentialsParams) Validate() error {
@@ -493,6 +553,10 @@ func (c CreateGithubCredentialsParams) Validate() error {
 
 	if c.Endpoint == "" {
 		return runnerErrors.NewBadRequestError("missing endpoint")
+	}
+
+	if c.ReserveUsagePercentage > MaxReserveUsagePercentage || c.ReserveUsagePercentage < 0 {
+		return runnerErrors.NewBadRequestError("value for reserve_usage_percentage must be an int between 0 and %d", MaxReserveUsagePercentage)
 	}
 
 	switch c.AuthType {
@@ -522,6 +586,15 @@ type UpdateGithubCredentialsParams struct {
 	Description *string    `json:"description,omitempty"`
 	PAT         *GithubPAT `json:"pat,omitempty"`
 	App         *GithubApp `json:"app,omitempty"`
+	// ReserveUsageEnabled toggles whether or not to allocate a certain
+	// percentage of the available rate limit to critical operations such
+	// as delete operations for runners that have finished their jobs.
+	ReserveUsageEnabled *bool `json:"reserve_usage_enabled,omitempty"`
+	// ReserveUsagePercentage is the percentage of available rate limit reserved
+	// for critical operations. Setting this value too high will negatively impact
+	// normal operations, so it is capped at 50%. A value between 5% and 20%
+	// should be safe on most setups. Adjust this based on your usage patterns.
+	ReserveUsagePercentage *int `json:"reserve_usage_percentage,omitempty"`
 }
 
 func (u UpdateGithubCredentialsParams) Validate() error {
@@ -541,6 +614,10 @@ func (u UpdateGithubCredentialsParams) Validate() error {
 		}
 	}
 
+	if u.ReserveUsagePercentage != nil && (*u.ReserveUsagePercentage > MaxReserveUsagePercentage || *u.ReserveUsagePercentage < 0) {
+		return runnerErrors.NewBadRequestError("value for reserve_usage_percentage must be an int between 0 and %d", MaxReserveUsagePercentage)
+	}
+
 	return nil
 }
 
@@ -552,9 +629,18 @@ type UpdateControllerParams struct {
 	AgentURL             *string `json:"agent_url,omitempty"`
 	GARMAgentReleasesURL *string `json:"garm_agent_releases_url,omitempty"`
 	SyncGARMAgentTools   *bool   `json:"enable_agent_tools_sync,omitempty"`
-	MinimumJobAgeBackoff *uint   `json:"minimum_job_age_backoff,omitempty"`
-	CACertBundle         []byte  `json:"ca_cert_bundle,omitempty"`
-	ClearCACertBundle    *bool   `json:"clear_ca_cert_bundle,omitempty"`
+	// GARMAgentVersion pins the garm-agent version the controller uses. An
+	// empty string or "latest" tracks the newest release at
+	// GARMAgentReleasesURL; any other value must be a valid semver version.
+	GARMAgentVersion *string `json:"garm_agent_version,omitempty"`
+	// AllowInsecureGARMAgent configures deployed garm-agents to connect to
+	// GARM over plain http/ws (the agent's force_insecure setting). Meant
+	// for local development and testing only.
+	AllowInsecureGARMAgent *bool `json:"allow_insecure_garm_agent,omitempty"`
+	MinimumJobAgeBackoff   *uint `json:"minimum_job_age_backoff,omitempty"`
+	// swagger:strfmt byte
+	CACertBundle      []byte `json:"ca_cert_bundle,omitempty"`
+	ClearCACertBundle *bool  `json:"clear_ca_cert_bundle,omitempty"`
 }
 
 func (u UpdateControllerParams) Validate() error {
@@ -596,6 +682,12 @@ func (u UpdateControllerParams) Validate() error {
 		}
 	}
 
+	if u.GARMAgentVersion != nil {
+		if err := ValidateGARMAgentVersion(strings.TrimSpace(*u.GARMAgentVersion)); err != nil {
+			return err
+		}
+	}
+
 	return nil
 }
 
@@ -624,6 +716,9 @@ type CreateScaleSetParams struct {
 	GitHubRunnerGroup string   `json:"github-runner-group,omitempty"`
 	TemplateID        *uint    `json:"template_id,omitempty"`
 	Labels            []string `json:"labels,omitempty"`
+	// ProxyID is the ID of the proxy definition runners in this scale set
+	// will use.
+	ProxyID *uint `json:"proxy_id,omitempty"`
 }
 
 func (s *CreateScaleSetParams) Validate() error {
@@ -676,6 +771,7 @@ type UpdateScaleSetParams struct {
 	RunnerPrefix
 
 	Name                   string              `json:"name,omitempty"`
+	DisableUpdate          *bool               `json:"disable_update,omitempty"`
 	Enabled                *bool               `json:"enabled,omitempty"`
 	MaxRunners             *uint               `json:"max_runners,omitempty"`
 	MinIdleRunners         *uint               `json:"min_idle_runners,omitempty"`
@@ -694,14 +790,18 @@ type UpdateScaleSetParams struct {
 	ExtendedState     *string        `json:"extended_state"`
 	TemplateID        *uint          `json:"template_id,omitempty"`
 	ScaleSetID        int            `json:"-"`
+	// ProxyID is the ID of the proxy definition runners in this scale set
+	// will use. Setting it to 0 removes the proxy from the scale set.
+	ProxyID *uint `json:"proxy_id,omitempty"`
 }
 
 // swagger:model CreateGiteaEndpointParams
 type CreateGiteaEndpointParams struct {
-	Name                     string `json:"name,omitempty"`
-	Description              string `json:"description,omitempty"`
-	APIBaseURL               string `json:"api_base_url,omitempty"`
-	BaseURL                  string `json:"base_url,omitempty"`
+	Name        string `json:"name,omitempty"`
+	Description string `json:"description,omitempty"`
+	APIBaseURL  string `json:"api_base_url,omitempty"`
+	BaseURL     string `json:"base_url,omitempty"`
+	// swagger:strfmt byte
 	CACertBundle             []byte `json:"ca_cert_bundle,omitempty"`
 	ToolsMetadataURL         string `json:"tools_metadata_url,omitempty"`
 	UseInternalToolsMetadata *bool  `json:"use_internal_tools_metadata,omitempty"`
@@ -764,12 +864,13 @@ func (c CreateGiteaEndpointParams) Validate() error {
 
 // swagger:model UpdateGiteaEndpointParams
 type UpdateGiteaEndpointParams struct {
-	Description              *string `json:"description,omitempty"`
-	APIBaseURL               *string `json:"api_base_url,omitempty"`
-	BaseURL                  *string `json:"base_url,omitempty"`
-	CACertBundle             []byte  `json:"ca_cert_bundle,omitempty"`
-	ToolsMetadataURL         string  `json:"tools_metadata_url,omitempty"`
-	UseInternalToolsMetadata *bool   `json:"use_internal_tools_metadata,omitempty"`
+	Description *string `json:"description,omitempty"`
+	APIBaseURL  *string `json:"api_base_url,omitempty"`
+	BaseURL     *string `json:"base_url,omitempty"`
+	// swagger:strfmt byte
+	CACertBundle             []byte `json:"ca_cert_bundle,omitempty"`
+	ToolsMetadataURL         string `json:"tools_metadata_url,omitempty"`
+	UseInternalToolsMetadata *bool  `json:"use_internal_tools_metadata,omitempty"`
 }
 
 func (u UpdateGiteaEndpointParams) Validate() error {
@@ -875,12 +976,13 @@ func (u UpdateGiteaCredentialsParams) Validate() error {
 
 // swagger:model CreateTemplateParams
 type CreateTemplateParams struct {
-	Name        string              `json:"name"`
-	Description string              `json:"description"`
-	Data        []byte              `json:"data"`
-	OSType      commonParams.OSType `json:"os_type"`
-	ForgeType   EndpointType        `json:"forge_type,omitempty"`
-	IsSystem    bool                `json:"-"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	// swagger:strfmt byte
+	Data      []byte              `json:"data"`
+	OSType    commonParams.OSType `json:"os_type"`
+	ForgeType EndpointType        `json:"forge_type,omitempty"`
+	IsSystem  bool                `json:"-"`
 }
 
 func (c *CreateTemplateParams) Validate() error {
@@ -910,12 +1012,128 @@ func (c *CreateTemplateParams) Validate() error {
 type UpdateTemplateParams struct {
 	Name        *string `json:"name"`
 	Description *string `json:"description"`
-	Data        []byte  `json:"data"`
+	// swagger:strfmt byte
+	Data []byte `json:"data"`
 }
 
 func (u *UpdateTemplateParams) Validate() error {
 	if u.Name != nil && *u.Name == "" {
 		return fmt.Errorf("name cannot be empty")
+	}
+
+	return nil
+}
+
+// validateProxyURL validates a proxy URL. Credentials must not be embedded
+// in the URL itself. They are set separately and composed into the final
+// proxy URL when needed.
+func validateProxyURL(proxyURL string) error {
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		return runnerErrors.NewBadRequestError("invalid proxy URL: %q", proxyURL)
+	}
+
+	switch parsed.Scheme {
+	case httpScheme, httpsScheme, socks5Scheme:
+	default:
+		return runnerErrors.NewBadRequestError("invalid proxy URL scheme %q; supported schemes are http, https and socks5", parsed.Scheme)
+	}
+
+	if parsed.Host == "" {
+		return runnerErrors.NewBadRequestError("invalid proxy URL: %q; missing host", proxyURL)
+	}
+
+	if parsed.User != nil {
+		return runnerErrors.NewBadRequestError("proxy URLs must not embed credentials; use the username and password fields instead")
+	}
+
+	return nil
+}
+
+// swagger:model CreateProxyParams
+type CreateProxyParams struct {
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+
+	// HTTPProxy is the proxy URL used for plain HTTP requests.
+	HTTPProxy string `json:"http_proxy,omitempty"`
+	// HTTPSProxy is the proxy URL used for HTTPS requests.
+	HTTPSProxy string `json:"https_proxy,omitempty"`
+	// NoProxy is a comma separated list of hosts, domains or CIDRs for
+	// which the proxy should be bypassed.
+	NoProxy string `json:"no_proxy,omitempty"`
+
+	// Username is the username used to authenticate to the proxy.
+	Username string `json:"username,omitempty"`
+	// Password is the password used to authenticate to the proxy.
+	Password string `json:"password,omitempty"`
+}
+
+func (c *CreateProxyParams) Validate() error {
+	if c.Name == "" {
+		return runnerErrors.NewBadRequestError("name cannot be empty")
+	}
+
+	if c.HTTPProxy == "" && c.HTTPSProxy == "" {
+		return runnerErrors.NewBadRequestError("at least one of http_proxy or https_proxy must be set")
+	}
+
+	if c.HTTPProxy != "" {
+		if err := validateProxyURL(c.HTTPProxy); err != nil {
+			return err
+		}
+	}
+
+	if c.HTTPSProxy != "" {
+		if err := validateProxyURL(c.HTTPSProxy); err != nil {
+			return err
+		}
+	}
+
+	if c.Password != "" && c.Username == "" {
+		return runnerErrors.NewBadRequestError("password cannot be set without a username")
+	}
+
+	return nil
+}
+
+// swagger:model UpdateProxyParams
+type UpdateProxyParams struct {
+	Name        *string `json:"name,omitempty"`
+	Description *string `json:"description,omitempty"`
+
+	// HTTPProxy is the proxy URL used for plain HTTP requests.
+	HTTPProxy *string `json:"http_proxy,omitempty"`
+	// HTTPSProxy is the proxy URL used for HTTPS requests.
+	HTTPSProxy *string `json:"https_proxy,omitempty"`
+	// NoProxy is a comma separated list of hosts, domains or CIDRs for
+	// which the proxy should be bypassed. Setting it to an empty string
+	// clears the value.
+	NoProxy *string `json:"no_proxy,omitempty"`
+
+	// Username is the username used to authenticate to the proxy. Setting
+	// it to an empty string clears the proxy credentials.
+	Username *string `json:"username,omitempty"`
+	// Password is the password used to authenticate to the proxy. Setting
+	// it to an empty string clears the password.
+	Password *string `json:"password,omitempty"`
+}
+
+func (u *UpdateProxyParams) Validate() error {
+	if u.Name != nil && *u.Name == "" {
+		return runnerErrors.NewBadRequestError("name cannot be empty")
+	}
+
+	if u.HTTPProxy != nil && *u.HTTPProxy != "" {
+		if err := validateProxyURL(*u.HTTPProxy); err != nil {
+			return err
+		}
+	}
+
+	if u.HTTPSProxy != nil && *u.HTTPSProxy != "" {
+		if err := validateProxyURL(*u.HTTPSProxy); err != nil {
+			return err
+		}
 	}
 
 	return nil

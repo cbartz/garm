@@ -21,11 +21,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"io"
 	"log/slog"
 	"net/url"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/cloudbase/garm-provider-common/cloudconfig"
@@ -53,6 +53,18 @@ After=network.target
 ExecStart=/home/{{.RunAsUser}}/actions-runner/runsvc.sh
 User={{.RunAsUser}}
 WorkingDirectory=/home/{{.RunAsUser}}/actions-runner
+{{- if .HTTPProxy }}
+Environment="HTTP_PROXY={{.HTTPProxy}}"
+Environment="http_proxy={{.HTTPProxy}}"
+{{- end }}
+{{- if .HTTPSProxy }}
+Environment="HTTPS_PROXY={{.HTTPSProxy}}"
+Environment="https_proxy={{.HTTPSProxy}}"
+{{- end }}
+{{- if .NoProxy }}
+Environment="NO_PROXY={{.NoProxy}}"
+Environment="no_proxy={{.NoProxy}}"
+{{- end }}
 KillMode=process
 KillSignal=SIGTERM
 TimeoutStopSec=5min
@@ -69,6 +81,18 @@ After=network.target
 ExecStart=/home/{{.RunAsUser}}/gitea-runner/gitea-runner daemon --once
 User={{.RunAsUser}}
 WorkingDirectory=/home/{{.RunAsUser}}/gitea-runner
+{{- if .HTTPProxy }}
+Environment="HTTP_PROXY={{.HTTPProxy}}"
+Environment="http_proxy={{.HTTPProxy}}"
+{{- end }}
+{{- if .HTTPSProxy }}
+Environment="HTTPS_PROXY={{.HTTPSProxy}}"
+Environment="https_proxy={{.HTTPSProxy}}"
+{{- end }}
+{{- if .NoProxy }}
+Environment="NO_PROXY={{.NoProxy}}"
+Environment="no_proxy={{.NoProxy}}"
+{{- end }}
 KillMode=process
 KillSignal=SIGTERM
 TimeoutStopSec=5min
@@ -99,6 +123,8 @@ func (r *Runner) getServiceNameForEntity(entity params.ForgeEntity) (string, err
 		return fmt.Sprintf("actions.runner.%s", entity.Owner), nil
 	case params.ForgeEntityTypeRepository:
 		return fmt.Sprintf("actions.runner.%s.%s", entity.Owner, entity.Name), nil
+	case params.ForgeEntityTypeInstance:
+		return fmt.Sprintf("actions.runner.%s", entity.Credentials.Endpoint.Name), nil
 	default:
 		return "", errors.New("unknown entity type")
 	}
@@ -428,10 +454,18 @@ func (r *Runner) GetRunnerInstallScript(ctx context.Context) ([]byte, error) {
 		}
 	}
 
+	proxyConfig, err := getInstanceProxyConfig(instance)
+	if err != nil {
+		return nil, fmt.Errorf("error resolving instance proxy: %w", err)
+	}
+
 	// Build agent context for the template so templates don't need
 	// to fetch metadata and parse it with jq at runtime.
 	tplCtx := templates.InstallContext{
 		InstallRunnerParams: installCtx,
+		HTTPProxy:           proxyConfig.HTTPProxy,
+		HTTPSProxy:          proxyConfig.HTTPSProxy,
+		NoProxy:             proxyConfig.NoProxy,
 	}
 	if entity.AgentMode {
 		tplCtx.AgentMode = true
@@ -443,8 +477,10 @@ func (r *Runner) GetRunnerInstallScript(ctx context.Context) ([]byte, error) {
 				return nil, fmt.Errorf("failed to get agent token: %w", err)
 			}
 			tplCtx.AgentToken = agentToken
-			tplCtx.AgentURL = cache.ControllerInfo().AgentURL
+			controllerInfo := cache.ControllerInfo()
+			tplCtx.AgentURL = controllerInfo.AgentURL
 			tplCtx.AgentShell = fmt.Sprintf("%t", enableShell)
+			tplCtx.ForceInsecureGARMAgent = controllerInfo.AllowInsecureGARMAgent
 		} else {
 			slog.WarnContext(ctx, "agent mode enabled but no tools available",
 				"runner_name", instance.Name)
@@ -466,9 +502,47 @@ func (r *Runner) GetRunnerInstallScript(ctx context.Context) ([]byte, error) {
 
 	installScript, err := templates.RenderRunnerInstallScript(string(tplBytes), tplCtx)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get runner install script: %w", err)
+		// A render failure is deterministic (the template is broken), so return
+		// a bad-request rather than a generic 500 error. A 500 error is opaque
+		// to the caller. The install wrapper surfaces this detail as the runner's
+		// "failed" status so the instance doesn't hang in "installing" forever.
+		return nil, runnerErrors.NewBadRequestError("failed to render runner install script: %s", err)
 	}
 	return installScript, nil
+}
+
+// getInstanceProxyConfig resolves the proxy definition set on the pool or
+// scale set the instance belongs to and composes the final proxy config. An
+// empty config is returned when no proxy is set. An error is returned when a
+// proxy is set but cannot be resolved from the cache.
+func getInstanceProxyConfig(instance params.Instance) (commonParams.ProxyConfig, error) {
+	var proxyID uint
+	switch {
+	case instance.PoolID != "":
+		if pool, ok := cache.GetPoolByID(instance.PoolID); ok {
+			proxyID = pool.ProxyID
+		}
+	case instance.ScaleSetID > 0:
+		if scaleSet, ok := cache.GetScaleSetByID(instance.ScaleSetID); ok {
+			proxyID = scaleSet.ProxyID
+		}
+	}
+	if proxyID == 0 {
+		return commonParams.ProxyConfig{}, nil
+	}
+
+	proxy, ok := cache.GetProxy(proxyID)
+	if !ok {
+		return commonParams.ProxyConfig{}, fmt.Errorf("proxy %d set on the pool or scale set of instance %s was not found in cache", proxyID, instance.Name)
+	}
+	return proxy.ProxyConfig(), nil
+}
+
+// systemdEscape escapes the percent sign in values rendered into systemd
+// unit files. systemd expands % as a specifier; proxy URLs carry percent
+// encoded credentials.
+func systemdEscape(val string) string {
+	return strings.ReplaceAll(val, "%", "%%")
 }
 
 func (r *Runner) GenerateSystemdUnitFile(ctx context.Context, runAsUser string) ([]byte, error) {
@@ -476,6 +550,18 @@ func (r *Runner) GenerateSystemdUnitFile(ctx context.Context, runAsUser string) 
 	if err != nil {
 		slog.ErrorContext(r.ctx, "failed to get entity", "error", err)
 		return nil, runnerErrors.ErrUnauthorized
+	}
+
+	instance, err := auth.InstanceParams(ctx)
+	if err != nil {
+		slog.ErrorContext(r.ctx, "failed to get instance params", "error", err)
+		return nil, runnerErrors.ErrUnauthorized
+	}
+
+	proxyConfig, err := getInstanceProxyConfig(instance)
+	if err != nil {
+		slog.ErrorContext(r.ctx, "failed to resolve instance proxy", "error", err)
+		return nil, fmt.Errorf("error resolving instance proxy: %w", err)
 	}
 
 	serviceName, err := r.getServiceNameForEntity(entity)
@@ -506,9 +592,15 @@ func (r *Runner) GenerateSystemdUnitFile(ctx context.Context, runAsUser string) 
 	data := struct {
 		ServiceName string
 		RunAsUser   string
+		HTTPProxy   string
+		HTTPSProxy  string
+		NoProxy     string
 	}{
 		ServiceName: serviceName,
 		RunAsUser:   runAsUser,
+		HTTPProxy:   systemdEscape(proxyConfig.HTTPProxy),
+		HTTPSProxy:  systemdEscape(proxyConfig.HTTPSProxy),
+		NoProxy:     systemdEscape(proxyConfig.NoProxy),
 	}
 
 	var unitFile bytes.Buffer

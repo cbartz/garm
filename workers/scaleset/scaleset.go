@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -28,10 +29,13 @@ import (
 	"github.com/cloudbase/garm/cache"
 	dbCommon "github.com/cloudbase/garm/database/common"
 	"github.com/cloudbase/garm/database/watcher"
+	garmErrors "github.com/cloudbase/garm/internal/errors"
 	"github.com/cloudbase/garm/locking"
+	"github.com/cloudbase/garm/metrics"
 	"github.com/cloudbase/garm/params"
 	"github.com/cloudbase/garm/runner/common"
 	garmUtil "github.com/cloudbase/garm/util"
+	workersCommon "github.com/cloudbase/garm/workers/common"
 )
 
 func NewWorker(ctx context.Context, store dbCommon.Store, scaleSet params.ScaleSet, provider common.Provider) (*Worker, error) {
@@ -61,6 +65,7 @@ func NewWorker(ctx context.Context, store dbCommon.Store, scaleSet params.ScaleS
 		scaleSet:       scaleSet,
 		entity:         entity,
 		runners:        make(map[string]params.Instance),
+		pseudoPoolID:   garmUtil.ScaleSetPseudoPoolID(scalesetEntity.ID, scaleSet.ID),
 	}, nil
 }
 
@@ -75,13 +80,42 @@ type Worker struct {
 	entity   params.ForgeEntity
 	runners  map[string]params.Instance
 
+	// pseudoPoolID is the stable pool ID reported to providers for this scale
+	// set. It is derived from immutable IDs, so it is computed once.
+	pseudoPoolID string
+	// legacyPoolIDDrained indicates that the provider no longer has any
+	// instances tagged with the legacy name-based pseudo pool ID, so we can
+	// stop querying for it.
+	legacyPoolIDDrained bool
+
 	consumer dbCommon.Consumer
+
+	// eventQueue decouples the watcher consumer from event handling. The
+	// drain loop forwards events into it without blocking, and a single
+	// Process goroutine applies them strictly in delivery order — handlers
+	// mutate w.runners, so out-of-order application would leave stale or
+	// ghost entries.
+	eventQueue *workersCommon.UnboundedChan[dbCommon.ChangePayload]
 
 	listener *scaleSetListener
 
 	mux     sync.Mutex
 	running bool
 	quit    chan struct{}
+
+	// authFailed marks that the forge rejected our credentials. While set,
+	// the listener is not restarted and scaling is paused, instead of
+	// hammering the forge with calls that cannot succeed. The latch clears
+	// when the entity worker installs a fresh client after a credentials
+	// update, and is retried periodically as a safety valve. This is kept
+	// separate from rate limiting: a quota reset must not resume a worker
+	// whose credentials are still rejected.
+	authFailed    bool
+	authFailedCli common.GithubClient
+	authFailureAt time.Time
+	// scalingPauseReason tracks why scaling is paused, so pause/resume
+	// transitions are logged once instead of on every autoscale tick.
+	scalingPauseReason string
 }
 
 func (w *Worker) ensureScaleSetInGitHub() error {
@@ -169,6 +203,10 @@ func (w *Worker) Stop() error {
 		close(w.quit)
 	}
 	w.listener.Stop()
+	// Drop the freshness gauge so a stopped (possibly deleted) scale set
+	// does not linger as a stale timestamp and trip staleness alerts. It is
+	// re-set on the next successful poll if the worker comes back.
+	metrics.ScaleSetListenerLastSuccess.DeleteLabelValues(strconv.FormatUint(uint64(w.scaleSet.ID), 10))
 	return nil
 }
 
@@ -270,6 +308,9 @@ func (w *Worker) Start() (err error) {
 					return fmt.Errorf("updating runner %s: %w", instance.Name, err)
 				}
 			}
+			if instanceState == commonParams.InstancePendingDelete {
+				w.recordLifecycleEvent(metrics.OutcomeStartupRecovery)
+			}
 		case commonParams.InstanceDeleting:
 			// Set the instance in deleting. It is assumed that the runner was already
 			// removed from github either by github or by garm. Deleting status indicates
@@ -328,8 +369,10 @@ func (w *Worker) Start() (err error) {
 	w.consumer = consumer
 	w.running = true
 	w.quit = make(chan struct{})
+	w.eventQueue = workersCommon.NewUnboundedChan[dbCommon.ChangePayload](w.ctx, w.quit)
 
 	slog.DebugContext(w.ctx, "starting scale set worker loops", "scale_set", w.consumerID)
+	go w.eventQueue.Process(w.handleEvent)
 	go w.loop()
 	go w.keepListenerAlive()
 	go w.handleAutoScale()
@@ -350,9 +393,7 @@ func (w *Worker) setRunnerDBStatus(runner string, status commonParams.InstanceSt
 	}
 	newDbInstance, err := w.store.UpdateInstance(w.ctx, runner, updateParams)
 	if err != nil {
-		if !errors.Is(err, runnerErrors.ErrNotFound) {
-			return params.Instance{}, fmt.Errorf("updating runner %s: %w", runner, err)
-		}
+		return params.Instance{}, fmt.Errorf("updating runner %s: %w", runner, err)
 	}
 	return newDbInstance, nil
 }
@@ -369,10 +410,50 @@ func (w *Worker) removeRunnerFromGithubAndSetPendingDelete(runnerName string, ag
 	}
 	instance, err := w.setRunnerDBStatus(runnerName, commonParams.InstancePendingDelete)
 	if err != nil {
-		return fmt.Errorf("updating runner %s: %w", instance.Name, err)
+		if errors.Is(err, runnerErrors.ErrNotFound) {
+			// The runner record is already gone from the database; there is
+			// nothing left to mark. The watcher delete event will evict it
+			// from the local cache.
+			return nil
+		}
+		return fmt.Errorf("updating runner %s: %w", runnerName, err)
 	}
 	w.runners[instance.ID] = instance
 	return nil
+}
+
+// providerBaseParams returns the base provider parameters for operations on
+// this scale set's runners, identifying the owning entity and scale set.
+func (w *Worker) providerBaseParams() common.ProviderBaseParams {
+	base := common.ProviderBaseParams{
+		ControllerInfo: w.controllerInfo,
+		ScaleSetID:     w.scaleSet.ID,
+	}
+	if entity, err := w.scaleSet.GetEntity(); err == nil {
+		base.EntityType = entity.EntityType
+		base.EntityID = entity.ID
+	}
+	return base
+}
+
+// recordLifecycleEvent counts a runner removal decision made for this scale
+// set, by outcome. The entity String() form is used for the owner label; a
+// bare repo name would be ambiguous across owners.
+func (w *Worker) recordLifecycleEvent(outcome string) {
+	var owner string
+	if entity, err := w.scaleSet.GetEntity(); err == nil {
+		if cachedEntity, ok := cache.GetEntity(entity.ID); ok {
+			owner = cachedEntity.String()
+		}
+	}
+	metrics.RunnerLifecycleCount.WithLabelValues(
+		outcome,                           // label: outcome
+		w.scaleSet.ProviderName,           // label: provider
+		owner,                             // label: pool_owner
+		string(w.scaleSet.ScaleSetType()), // label: pool_type
+		"",                                // label: pool_id
+		strconv.FormatUint(uint64(w.scaleSet.ID), 10), // label: scaleset_id
+	).Inc()
 }
 
 func (w *Worker) reapTimedOutRunners(runners map[string]params.RunnerReference) (func(), error) {
@@ -393,10 +474,21 @@ func (w *Worker) reapTimedOutRunners(runners map[string]params.RunnerReference) 
 		case commonParams.InstancePendingDelete, commonParams.InstancePendingForceDelete,
 			commonParams.InstanceDeleting, commonParams.InstanceDeleted:
 			continue
+		case commonParams.InstanceCreating, commonParams.InstancePendingCreate:
+			// Instance is still being created in the provider, or is about to be
+			// created. The provider worker owns create timeouts/failures: the
+			// create call carries a deadline derived from the bootstrap timeout
+			// (and optionally the provider exec timeout), so an instance cannot
+			// linger here past it; on failure or expiry the provider worker moves
+			// it through Error -> PendingDelete on its own. Nothing for the
+			// scale-set-level reaper to do; jumping straight to pending_delete
+			// from here is also not a valid status transition (creating only
+			// allows -> error or -> running).
+			continue
 		}
 
-		if runner.RunnerStatus != params.RunnerPending && runner.RunnerStatus != params.RunnerInstalling {
-			slog.DebugContext(w.ctx, "runner is not pending or installing; skipping", "runner_name", runner.Name)
+		if runner.RunnerStatus != params.RunnerPending && runner.RunnerStatus != params.RunnerInstalling && runner.RunnerStatus != params.RunnerFailed {
+			slog.DebugContext(w.ctx, "runner is not pending, installing or failed; skipping", "runner_name", runner.Name)
 			continue
 		}
 		if ghRunner, ok := runners[runner.Name]; !ok || ghRunner.GetStatus() == params.RunnerOffline {
@@ -404,23 +496,28 @@ func (w *Worker) reapTimedOutRunners(runners map[string]params.RunnerReference) 
 				slog.DebugContext(w.ctx, "runner is locked; skipping", "runner_name", runner.Name)
 				continue
 			}
-			lockNames = append(lockNames, runner.Name)
 
 			slog.InfoContext(
 				w.ctx, "reaping timed-out/failed runner",
 				"runner_name", runner.Name)
 
 			if err := w.removeRunnerFromGithubAndSetPendingDelete(runner.Name, runner.AgentID); err != nil {
+				// Don't let a single poisoned runner (e.g. one that raced into a
+				// status that can no longer transition to pending_delete through
+				// some other codepath) abort reaping for the rest of the batch.
+				// Log it, release just this runner's lock, and keep going.
 				slog.ErrorContext(w.ctx, "error removing runner", "runner_name", runner.Name, "error", err)
-				unlockFn()
-				return nil, fmt.Errorf("removing runner %s: %w", runner.Name, err)
+				locking.Unlock(runner.Name, false)
+				continue
 			}
+			w.recordLifecycleEvent(metrics.OutcomeBootstrapTimeout)
+			lockNames = append(lockNames, runner.Name)
 		}
 	}
 	return unlockFn, nil
 }
 
-func (w *Worker) consolidateRunnerState(runners []params.RunnerReference) error {
+func (w *Worker) consolidateRunnerState(listedAt time.Time, runners []params.RunnerReference) error {
 	w.mux.Lock()
 	defer w.mux.Unlock()
 
@@ -470,27 +567,67 @@ func (w *Worker) consolidateRunnerState(runners []params.RunnerReference) error 
 		case commonParams.InstancePendingDelete, commonParams.InstancePendingForceDelete,
 			commonParams.InstanceDeleting, commonParams.InstanceDeleted:
 			continue
+		case commonParams.InstanceCreating:
+			// The provider worker owns provisioning; an instance in creating
+			// cannot transition to pending_delete while the create call is in
+			// flight. If its runner is missing from github, we will pick it up
+			// on a later pass, once the create returns and the instance moves
+			// to running or error.
+			continue
 		}
 
 		if _, ok := ghRunnersByName[name]; !ok {
+			// The github listing is a snapshot taken before this function ran.
+			// A runner registered around or after that moment is absent from it
+			// by construction, not because it's gone. Don't judge a runner
+			// younger than the evidence. A future pass will see it.
+			if runner.CreatedAt.After(listedAt.Add(-time.Minute)) {
+				slog.DebugContext(w.ctx, "runner is newer than the github runner listing; skipping", "runner_name", name)
+				continue
+			}
 			if ok := locking.TryLock(name, w.consumerID); !ok {
 				slog.DebugContext(w.ctx, "runner is locked; skipping", "runner_name", name)
 				continue
 			}
-			// unlock the runner only after this function returns. This function also cross
-			// checks between the provider and the database, and removes left over runners.
-			// If we unlock early, the provider worker will attempt to remove runners that
-			// we set in pending_delete. This function holds the mutex, so we won't see those
-			// changes until we return. So we hold the instance lock here until we are done.
-			// That way, even if the provider sees the pending_delete status, it won't act on
-			// it until it manages to lock the instance.
+			// unlock the runner only after this function returns. These locks are
+			// worker-local: they serialize this worker's own goroutines (listener
+			// handlers, reaper, scale down) so none of them process this runner
+			// while we reconcile it, including the provider cross-check further
+			// down. The provider worker does NOT participate in instance locking;
+			// it reacts to the pending_delete status via watcher events as soon
+			// as the transition commits. Cross-worker coordination is done by the
+			// status state machine, not by these locks.
 			defer locking.Unlock(name, false)
+
+			// Aditional guard against accidentally removing a runner that has picked
+			// up a job, but that got past our safety checks (ex: GH api didn't return it
+			// when we listed)
+			if err := scaleSetCli.RemoveRunner(w.ctx, runner.AgentID); err != nil {
+				if !errors.Is(err, runnerErrors.ErrNotFound) {
+					slog.ErrorContext(w.ctx, "error removing runner from github; skipping", "runner_name", name, "error", err)
+					continue
+				}
+			}
 
 			slog.InfoContext(w.ctx, "runner does not exist in github; removing from provider", "runner_name", name)
 			instance, err := w.setRunnerDBStatus(runner.Name, commonParams.InstancePendingDelete)
 			if err != nil {
-				if !errors.Is(err, runnerErrors.ErrNotFound) {
-					return fmt.Errorf("updating runner %s: %w", instance.Name, err)
+				var te *runnerErrors.InstanceTransitionError
+				switch {
+				case errors.Is(err, runnerErrors.ErrNotFound):
+					// The record is already gone from the database. Drop it from
+					// the local cache rather than writing back the zero-value
+					// instance below.
+					delete(w.runners, runner.ID)
+					continue
+				case errors.As(err, &te) && garmErrors.InstanceIsBeingDeleted(te.From):
+					// Already being deleted by another code path; nothing to do.
+					continue
+				default:
+					// Don't let one runner's error abort consolidation for the
+					// entire scale set; log it and keep processing the rest.
+					slog.ErrorContext(w.ctx, "error updating runner", "runner_name", runner.Name, "error", err)
+					continue
 				}
 			}
 			// We will get an update event anyway from the watcher, but updating the runner
@@ -498,23 +635,25 @@ func (w *Worker) consolidateRunnerState(runners []params.RunnerReference) error 
 			// which involves this runner. For the duration of the lifetime of this function, we
 			// hold the lock, so no race condition can occur.
 			w.runners[runner.ID] = instance
+			w.recordLifecycleEvent(metrics.OutcomeOrphaned)
 		}
 	}
 
-	// Cross check what exists in the provider with the DB.
-	pseudoPoolID, err := w.pseudoPoolID()
-	if err != nil {
-		return fmt.Errorf("getting pseudo pool ID: %w", err)
-	}
+	return w.consolidateProviderState()
+}
+
+// consolidateProviderState cross checks what exists in the provider with the
+// DB. Provider instances with no DB record are removed from the provider, and
+// DB runners with no provider instance are marked as pending_delete. Must be
+// called with w.mux held.
+func (w *Worker) consolidateProviderState() error {
 	listParams := common.ListInstancesParams{
 		ListInstancesV011: common.ListInstancesV011Params{
-			ProviderBaseParams: common.ProviderBaseParams{
-				ControllerInfo: w.controllerInfo,
-			},
+			ProviderBaseParams: w.providerBaseParams(),
 		},
 	}
 
-	providerRunners, err := w.provider.ListInstances(w.ctx, pseudoPoolID, listParams)
+	providerRunners, err := w.provider.ListInstances(w.ctx, w.pseudoPoolID, listParams)
 	if err != nil {
 		return fmt.Errorf("listing instances: %w", err)
 	}
@@ -524,16 +663,41 @@ func (w *Worker) consolidateRunnerState(runners []params.RunnerReference) error 
 		providerRunnersByName[runner.Name] = runner
 	}
 
+	if !w.legacyPoolIDDrained {
+		legacyID, err := w.legacyPseudoPoolID()
+		if err != nil {
+			return fmt.Errorf("getting legacy pseudo pool ID: %w", err)
+		}
+		legacyRunners, err := w.provider.ListInstances(w.ctx, legacyID, listParams)
+		if err != nil {
+			// it seems that some providers (like k8s) err out even during a list
+			// operation. If we got here, the ListInstances() call using the new
+			// ID, worked. So we just ignore the error, set w.legacyPoolIDDrained = true
+			// and hope for the best.
+			slog.WarnContext(w.ctx, "failed to list instances using legacy ID; ignoring", "error", err)
+			w.legacyPoolIDDrained = true
+		} else {
+			if len(legacyRunners) == 0 {
+				w.legacyPoolIDDrained = true
+			}
+			for _, runner := range legacyRunners {
+				if _, ok := providerRunnersByName[runner.Name]; ok {
+					continue
+				}
+				providerRunnersByName[runner.Name] = runner
+				providerRunners = append(providerRunners, runner)
+			}
+		}
+	}
+
 	deleteInstanceParams := common.DeleteInstanceParams{
 		DeleteInstanceV011: common.DeleteInstanceV011Params{
-			ProviderBaseParams: common.ProviderBaseParams{
-				ControllerInfo: w.controllerInfo,
-			},
+			ProviderBaseParams: w.providerBaseParams(),
 		},
 	}
 
-	// refresh the map. It may have been mutated above.
-	dbRunnersByName = w.runnerByName()
+	// The runner cache may have been mutated by the github cross check.
+	dbRunnersByName := w.runnerByName()
 	for _, runner := range providerRunners {
 		if _, ok := dbRunnersByName[runner.Name]; !ok {
 			slog.InfoContext(w.ctx, "runner does not exist in database; removing from provider", "runner_name", runner.Name)
@@ -574,9 +738,14 @@ func (w *Worker) consolidateRunnerState(runners []params.RunnerReference) error 
 			// The runner is not in the provider anymore. Remove it from the DB.
 			slog.InfoContext(w.ctx, "runner does not exist in provider; removing from database", "runner_name", runner.Name)
 			if err := w.removeRunnerFromGithubAndSetPendingDelete(runner.Name, runner.AgentID); err != nil {
+				// Same reasoning as reapTimedOutRunners and the github cross
+				// check above: one poisoned runner must not abort the sweep
+				// for the rest of the scale set. Log it and keep going.
+				slog.ErrorContext(w.ctx, "error removing runner", "runner_name", runner.Name, "error", err)
 				locking.Unlock(runner.Name, false)
-				return fmt.Errorf("removing runner %s: %w", runner.Name, err)
+				continue
 			}
+			w.recordLifecycleEvent(metrics.OutcomeOrphaned)
 		}
 		locking.Unlock(runner.Name, false)
 	}
@@ -584,8 +753,16 @@ func (w *Worker) consolidateRunnerState(runners []params.RunnerReference) error 
 	return nil
 }
 
-func (w *Worker) pseudoPoolID() (string, error) {
-	// This is temporary. We need to extend providers to know about scale sets.
+// legacyPseudoPoolID returns the deprecated name-based pseudo pool ID. Older
+// GARM versions tagged provider instances with this ID, so we keep listing by
+// it until no instances tagged with it remain. It must be recomputed on every
+// call, because the scale set name can change (which is bad and have failed to
+// consider this until now).
+//
+// Deprecated: This function is "born" deprecated because it transitions from
+// the old way to tag instances, to the new stable uuid V5 computed from the
+// entity ID and the internal scaleset ID.
+func (w *Worker) legacyPseudoPoolID() (string, error) {
 	entity, err := w.scaleSet.GetEntity()
 	if err != nil {
 		return "", fmt.Errorf("getting entity: %w", err)
@@ -694,7 +871,16 @@ func (w *Worker) loop() {
 				slog.InfoContext(w.ctx, "consumer channel closed")
 				return
 			}
-			go w.handleEvent(event)
+			// Forward to the serialized event queue. The queue router always
+			// accepts, so this cannot block the watcher drain; events are
+			// then applied in order by the Process goroutine.
+			select {
+			case w.eventQueue.In() <- event:
+			case <-w.quit:
+				return
+			case <-w.ctx.Done():
+				return
+			}
 		case <-w.ctx.Done():
 			slog.DebugContext(w.ctx, "context done")
 			return
@@ -718,10 +904,109 @@ func (w *Worker) sleepWithCancel(sleepTime time.Duration) (canceled bool) {
 	return true
 }
 
+// forgeAuthRetryInterval is how often we probe the forge again while the
+// auth failure latch is set, in case access was restored out of band (for
+// example an app installation that was unsuspended, or a PAT authorized
+// for an org enforcing SAML SSO) without a credentials update in GARM.
+const forgeAuthRetryInterval = 5 * time.Minute
+
+// markAuthFailure latches the auth failure state after a forge call was
+// rejected as unauthorized. Callers must not hold w.mux.
+func (w *Worker) markAuthFailure() {
+	// The scale set API maps both 401 and 403 to ErrUnauthorized. A fully
+	// exhausted quota can also produce 403 responses; treat that as a rate
+	// limit condition, not an auth failure — the rate limit gate handles it
+	// and clears on its own when the quota resets.
+	if limited, _ := cache.EntityRateLimitExhausted(w.entity.ID); limited {
+		slog.WarnContext(w.ctx, "forge call rejected while rate limit is exhausted; treating as rate limited")
+		return
+	}
+	cli, ok := cache.GetGithubClient(w.entity.ID)
+	if !ok {
+		cli = nil
+	}
+	w.mux.Lock()
+	w.authFailed = true
+	w.authFailedCli = cli
+	w.authFailureAt = time.Now()
+	w.mux.Unlock()
+	slog.WarnContext(w.ctx, "forge rejected our credentials; pausing scale set forge operations until credentials are updated")
+}
+
+func (w *Worker) clearAuthFailureLocked() {
+	if w.authFailed {
+		slog.InfoContext(w.ctx, "forge credentials accepted again; resuming scale set forge operations")
+	}
+	w.authFailed = false
+	w.authFailedCli = nil
+}
+
+func (w *Worker) clearAuthFailure() {
+	w.mux.Lock()
+	defer w.mux.Unlock()
+	w.clearAuthFailureLocked()
+}
+
+// forgeAuthBlockedLocked reports whether forge operations should stay paused
+// due to a previously latched auth failure. Callers must hold w.mux.
+func (w *Worker) forgeAuthBlockedLocked() bool {
+	if !w.authFailed {
+		return false
+	}
+	// A credentials update makes the entity worker install a fresh client in
+	// the cache. Give the new client a chance immediately.
+	if cli, ok := cache.GetGithubClient(w.entity.ID); ok && cli != w.authFailedCli {
+		w.clearAuthFailureLocked()
+		return false
+	}
+	// Safety valve: probe again periodically even without a credentials
+	// change. On failure the latch is simply re-armed with a fresh timestamp.
+	if time.Since(w.authFailureAt) >= forgeAuthRetryInterval {
+		return false
+	}
+	return true
+}
+
+// scalingPausedLocked reports whether scaling in either direction should
+// pause. Scaling talks to the forge (JIT config generation on the way up,
+// runner removal on the way down), so it pauses while the credentials are
+// rejected or while the remaining quota has dipped into the configured
+// reserve. The two conditions are independent: a rate limit reset does not
+// resume a worker whose credentials are still rejected, and vice versa.
+// Pause and resume transitions are logged once. Callers must hold w.mux.
+func (w *Worker) scalingPausedLocked() bool {
+	var reason string
+	if w.forgeAuthBlockedLocked() {
+		reason = "forge rejected our credentials"
+	} else if limited, resetAt := cache.EntityRateLimitReached(w.entity.ID); limited {
+		reason = fmt.Sprintf("rate limit reached; quota resets at %s", resetAt.UTC().Format(time.RFC3339))
+	}
+	if reason != w.scalingPauseReason {
+		if reason == "" {
+			slog.InfoContext(w.ctx, "resuming scale set scaling")
+		} else {
+			slog.InfoContext(w.ctx, "pausing scale set scaling", "reason", reason)
+		}
+		w.scalingPauseReason = reason
+	}
+	return reason != ""
+}
+
 func (w *Worker) sessionLoopMayRun() bool {
 	w.mux.Lock()
 	defer w.mux.Unlock()
-	return w.scaleSet.Enabled
+	if !w.scaleSet.Enabled || w.forgeAuthBlockedLocked() {
+		return false
+	}
+	// While the quota is fully exhausted, session (re)creation cannot
+	// succeed either: it needs a runner registration token, which is the
+	// one REST call in the message pipeline. Everything downstream (the
+	// broker long poll, session refresh against the actions service) uses
+	// session or admin tokens and does not consume the REST quota, so an
+	// established listener keeps running and only session (re)creation is
+	// held back. It resumes on its own once the quota resets.
+	limited, _ := cache.EntityRateLimitExhausted(w.entity.ID)
+	return !limited
 }
 
 func (w *Worker) keepListenerAlive() {
@@ -738,6 +1023,11 @@ Loop:
 		// noop if already started.
 		if err := w.listener.Start(); err != nil {
 			slog.ErrorContext(w.ctx, "error starting listener", "error", err, "consumer_id", w.consumerID)
+			if errors.Is(err, runnerErrors.ErrUnauthorized) {
+				// Latch the auth failure; sessionLoopMayRun() keeps us parked
+				// until credentials are updated or the retry interval elapses.
+				w.markAuthFailure()
+			}
 			if canceled := w.sleepWithCancel(2 * time.Second); canceled {
 				slog.InfoContext(w.ctx, "worker is stopped; exiting keepListenerAlive")
 				return
@@ -745,6 +1035,7 @@ Loop:
 			// we failed to start the listener. Try again.
 			continue
 		}
+		w.clearAuthFailure()
 
 		select {
 		case <-w.quit:
@@ -761,18 +1052,26 @@ Loop:
 				w.mux.Unlock()
 				continue Loop
 			}
+			metrics.ScaleSetListenerRestartsCount.WithLabelValues(
+				strconv.FormatUint(uint64(w.scaleSet.ID), 10), // label: id
+			).Inc()
 			w.mux.Unlock()
 			for {
 				w.mux.Lock()
-				// In case the scaleset was disabled while we were in the
-				// backoff sleep.
-				if !w.scaleSet.Enabled {
+				// In case the scaleset was disabled or the credentials were
+				// rejected while we were in the backoff sleep. The outer loop
+				// parks until the condition clears.
+				if !w.scaleSet.Enabled || w.forgeAuthBlockedLocked() {
 					w.mux.Unlock()
 					continue Loop
 				}
 				slog.DebugContext(w.ctx, "attempting to restart")
 				if err := w.listener.Start(); err != nil {
 					w.mux.Unlock()
+					if errors.Is(err, runnerErrors.ErrUnauthorized) {
+						w.markAuthFailure()
+						continue Loop
+					}
 					switch backoff {
 					case 0:
 						backoff = 5 * time.Second
@@ -788,6 +1087,7 @@ Loop:
 					continue
 				}
 				backoff = 0
+				w.clearAuthFailureLocked()
 				w.mux.Unlock()
 				continue Loop
 			}
@@ -887,7 +1187,20 @@ func (w *Worker) handleScaleDown() {
 		slog.ErrorContext(w.ctx, "error getting scale set client", "error", err)
 		return
 	}
+	// Runners already on their way out satisfy part of the delta before any
+	// new victim is picked. Counting them during the removal loop instead
+	// would make the outcome depend on map iteration order: an idle runner
+	// could be removed while a runner already being deleted would have
+	// covered the delta.
 	removed := 0
+	for _, runner := range w.runners {
+		switch runner.Status {
+		case commonParams.InstancePendingDelete, commonParams.InstancePendingForceDelete,
+			commonParams.InstanceDeleting:
+			removed++
+		}
+	}
+
 	for _, runner := range w.runners {
 		slog.InfoContext(w.ctx, "considering runners for removal", "delta", delta, "removed", removed)
 		if removed >= delta {
@@ -895,9 +1208,14 @@ func (w *Worker) handleScaleDown() {
 		}
 		switch runner.Status {
 		case commonParams.InstanceRunning:
-			switch runner.RunnerStatus {
-			case params.RunnerTerminated, params.RunnerActive:
-				slog.DebugContext(w.ctx, "runner is not in a valid state; skipping", "runner_name", runner.Name, "runner_status", runner.RunnerStatus)
+			if runner.RunnerStatus != params.RunnerIdle {
+				// Scale down removes idle capacity, nothing else. A runner
+				// that is still bootstrapping (pending/installing) is moments
+				// away from being useful and will be picked up as idle on a
+				// later pass if the delta persists; stuck bootstraps are the
+				// reaper's job. Active and terminated runners are not
+				// removable capacity at all.
+				slog.DebugContext(w.ctx, "runner is not idle; skipping", "runner_name", runner.Name, "runner_status", runner.RunnerStatus)
 				continue
 			}
 			locked := locking.TryLock(runner.Name, w.consumerID)
@@ -927,6 +1245,18 @@ func (w *Worker) handleScaleDown() {
 					locking.Unlock(runner.Name, true)
 					continue
 				}
+				var te *runnerErrors.InstanceTransitionError
+				if errors.As(err, &te) && garmErrors.InstanceIsBeingDeleted(te.From) {
+					// Another code path already moved the instance into the
+					// deletion lane; it is being removed, which is what we wanted.
+					// Keep the lock entry (remove=false): the runner record still
+					// exists and other goroutines of this worker may be blocked
+					// on this lock; removing the entry from under a blocked
+					// waiter would let two goroutines hold the same runner's lock.
+					removed++
+					locking.Unlock(runner.Name, false)
+					continue
+				}
 				// nolint:golangci-lint,godox
 				// TODO: This should not happen, unless there is some issue with the database.
 				// The UpdateInstance() function should add tenacity, but even in that case, if it
@@ -936,11 +1266,16 @@ func (w *Worker) handleScaleDown() {
 				continue
 			}
 			w.runners[runner.ID] = updatedRunner
+			w.recordLifecycleEvent(metrics.OutcomeIdleScaleDown)
 			locking.Unlock(runner.Name, false)
 			removed++
 		case commonParams.InstancePendingDelete, commonParams.InstancePendingForceDelete,
-			commonParams.InstanceDeleting, commonParams.InstanceDeleted:
-			removed++
+			commonParams.InstanceDeleting:
+			// Already counted against the delta before the loop.
+			continue
+		case commonParams.InstanceDeleted:
+			// Provider resource is gone and the record is excluded from
+			// runnerCount(); it is not part of the delta.
 			continue
 		default:
 			slog.WarnContext(w.ctx, "runner is not in a valid state; skipping", "runner_name", runner.Name, "runner_status", runner.Status)
@@ -959,8 +1294,20 @@ func (w *Worker) targetRunners() int {
 	return int(targetRunners)
 }
 
+// runnerCount returns the number of runners that still occupy capacity in
+// the provider. Runners on their way out (pending_delete, deleting) are
+// still physically present in the IaaS, so they count; only runners whose
+// provider resource is confirmed gone (deleted) are excluded — those records
+// merely await database cleanup.
 func (w *Worker) runnerCount() int {
-	return len(w.runners)
+	count := 0
+	for _, runner := range w.runners {
+		if runner.Status == commonParams.InstanceDeleted {
+			continue
+		}
+		count++
+	}
+	return count
 }
 
 func (w *Worker) handleAutoScale() {
@@ -998,6 +1345,14 @@ func (w *Worker) handleAutoScale() {
 				if err := w.handleInstanceCleanup(instance); err != nil {
 					slog.ErrorContext(w.ctx, "error cleaning up instance", "instance_id", instance.ID, "error", err)
 				}
+			}
+
+			// Instance cleanup above is database-only and always runs; the
+			// scaling decisions below talk to the forge and pause while rate
+			// limited or while our credentials are rejected.
+			if w.scalingPausedLocked() {
+				w.mux.Unlock()
+				continue
 			}
 
 			if w.runnerCount() == w.targetRunners() {

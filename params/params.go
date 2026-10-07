@@ -23,18 +23,50 @@ import (
 	"math"
 	"net"
 	"net/http"
+	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
 	"github.com/bradleyfalzon/ghinstallation/v2"
 	"github.com/google/go-github/v84/github"
 	"github.com/google/uuid"
+	"golang.org/x/mod/semver"
 	"golang.org/x/oauth2"
 
+	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
 	commonParams "github.com/cloudbase/garm-provider-common/params"
 	"github.com/cloudbase/garm/util/appdefaults"
 	garmX509 "github.com/cloudbase/garm/util/x509"
 )
+
+// GARMAgentLatestVersion denotes that the controller should track the latest
+// GARM agent release available at GARMAgentReleasesURL. An empty version is
+// equivalent.
+const GARMAgentLatestVersion = "latest"
+
+// semverCoreRe matches a full major.minor.patch version core with an optional
+// leading "v". golang.org/x/mod/semver alone would also accept shorthands
+// like "v1" or "v1.2", which are not valid semver.
+var semverCoreRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+([-+]|$)`)
+
+// ValidateGARMAgentVersion checks that a GARM agent version is either empty,
+// the "latest" keyword or a valid semver version (with or without a leading
+// "v"). It is used by the API, the CLI and the database layer so an invalid
+// version is rejected everywhere controller info can be updated.
+func ValidateGARMAgentVersion(version string) error {
+	if version == "" || version == GARMAgentLatestVersion {
+		return nil
+	}
+	canonical := version
+	if !strings.HasPrefix(canonical, "v") {
+		canonical = "v" + canonical
+	}
+	if !semverCoreRe.MatchString(canonical) || !semver.IsValid(canonical) {
+		return runnerErrors.NewBadRequestError("invalid garm_agent_version %q: must be %q or a semver version (e.g. v1.2.3)", version, GARMAgentLatestVersion)
+	}
+	return nil
+}
 
 type (
 	ForgeEntityType     string
@@ -84,6 +116,17 @@ const (
 	GiteaEndpointType  EndpointType = "gitea"
 )
 
+// SupportsInstancePools reports whether this forge type supports
+// instance-level (global/admin) runner pools.
+func (e EndpointType) SupportsInstancePools() bool {
+	switch e {
+	case GiteaEndpointType:
+		return true
+	default:
+		return false
+	}
+}
+
 const (
 	// LXDProvider represents the LXD provider.
 	LXDProvider ProviderType = "lxd"
@@ -116,12 +159,14 @@ const (
 	ForgeEntityTypeRepository   ForgeEntityType = "repository"
 	ForgeEntityTypeOrganization ForgeEntityType = "organization"
 	ForgeEntityTypeEnterprise   ForgeEntityType = "enterprise"
+	ForgeEntityTypeInstance     ForgeEntityType = "instance"
 )
 
 const (
 	MetricsLabelEnterpriseScope   = "Enterprise"
 	MetricsLabelRepositoryScope   = "Repository"
 	MetricsLabelOrganizationScope = "Organization"
+	MetricsLabelInstanceScope     = "Instance"
 )
 
 const (
@@ -236,12 +281,23 @@ var RunnerStatusTransitions = map[RunnerStatus][]RunnerStatus{
 		RunnerInstalling,
 		RunnerTerminated,
 		RunnerPending,
+		// The forge assigns jobs based on its own registration state; a
+		// "job started" event can arrive before the runner's own idle
+		// callback (or the image may never send callbacks at all), so a
+		// runner the forge considers busy is authoritatively active.
+		RunnerActive,
 	},
 	RunnerInstalling: {
 		RunnerFailed,
 		RunnerIdle,
 		RunnerTerminated,
 		RunnerInstalling,
+		// Same as RunnerPending: the forge saying a job started on this
+		// runner is proof it finished installing.
+		RunnerActive,
+		// When an agent manages the runner, the runner itself is offline,
+		// until the process is started and set online by the agent.
+		RunnerOffline,
 	},
 	RunnerIdle: {
 		RunnerOffline,
@@ -340,6 +396,8 @@ type Instance struct {
 
 	// ProviderFault holds any error messages captured from the IaaS provider that is
 	// responsible for managing the lifecycle of the runner.
+	//
+	// swagger:strfmt byte
 	ProviderFault []byte `json:"provider_fault,omitempty"`
 
 	// StatusMessages is a list of status messages sent back by the runner as it sets itself
@@ -426,6 +484,8 @@ type BootstrapInstance struct {
 	// CACertBundle is a CA certificate bundle which will be sent to instances and which
 	// will tipically be installed as a system wide trusted root CA. by either cloud-init
 	// or whatever mechanism the provider will use to set up the runner.
+	//
+	// swagger:strfmt byte
 	CACertBundle []byte `json:"ca-cert-bundle,omitempty"`
 
 	// OSArch is the target OS CPU architecture of the runner.
@@ -497,6 +557,8 @@ type Pool struct {
 	EnterpriseID   string `json:"enterprise_id,omitempty"`
 	EnterpriseName string `json:"enterprise_name,omitempty"`
 
+	ForgeInstanceID string `json:"forge_instance_id,omitempty"`
+
 	Endpoint ForgeEndpoint `json:"endpoint,omitempty"`
 
 	RunnerBootstrapTimeout uint      `json:"runner_bootstrap_timeout,omitempty"`
@@ -519,6 +581,12 @@ type Pool struct {
 
 	TemplateID   uint   `json:"template_id,omitempty"`
 	TemplateName string `json:"template_name,omitempty"`
+
+	// ProxyID is the ID of the proxy definition that will be used by runners
+	// spawned in this pool. Runners will use the proxy settings to reach back
+	// to GARM, the forge and any other resources they need during setup.
+	ProxyID   uint   `json:"proxy_id,omitempty"`
+	ProxyName string `json:"proxy_name,omitempty"`
 }
 
 func (p Pool) BelongsTo(entity ForgeEntity) bool {
@@ -529,6 +597,8 @@ func (p Pool) BelongsTo(entity ForgeEntity) bool {
 		return p.OrgID == entity.ID
 	case ForgeEntityTypeEnterprise:
 		return p.EnterpriseID == entity.ID
+	case ForgeEntityTypeInstance:
+		return p.ForgeInstanceID == entity.ID
 	}
 	return false
 }
@@ -569,6 +639,11 @@ func (p Pool) GetEntity() (ForgeEntity, error) {
 			ID:         p.EnterpriseID,
 			EntityType: ForgeEntityTypeEnterprise,
 		}, nil
+	case ForgeEntityTypeInstance:
+		return ForgeEntity{
+			ID:         p.ForgeInstanceID,
+			EntityType: ForgeEntityTypeInstance,
+		}, nil
 	}
 	return ForgeEntity{}, fmt.Errorf("pool has no associated entity")
 }
@@ -592,6 +667,8 @@ func (p *Pool) PoolType() ForgeEntityType {
 		return ForgeEntityTypeOrganization
 	case p.EnterpriseID != "":
 		return ForgeEntityTypeEnterprise
+	case p.ForgeInstanceID != "":
+		return ForgeEntityTypeInstance
 	}
 	return ""
 }
@@ -678,6 +755,12 @@ type ScaleSet struct {
 	EnterpriseName string `json:"enterprise_name,omitempty"`
 	TemplateID     uint   `json:"template_id,omitempty"`
 	TemplateName   string `json:"template_name,omitempty"`
+
+	// ProxyID is the ID of the proxy definition that will be used by runners
+	// spawned in this scale set. Runners will use the proxy settings to reach
+	// back to GARM, the forge and any other resources they need during setup.
+	ProxyID   uint   `json:"proxy_id,omitempty"`
+	ProxyName string `json:"proxy_name,omitempty"`
 
 	LastMessageID int64 `json:"-"`
 }
@@ -963,6 +1046,64 @@ func (e Enterprise) GetBalancerType() PoolBalancerType {
 // swagger:model Enterprises
 type Enterprises []Enterprise
 
+// swagger:model ForgeInstance
+type ForgeInstance struct {
+	ID    string `json:"id,omitempty"`
+	Pools []Pool `json:"pool,omitempty"`
+	// CredentialName is the name of the credentials associated with the forge instance.
+	// This field is now deprecated. Use CredentialsID instead. This field will be
+	// removed in v0.2.0.
+	CredentialsName   string            `json:"credentials_name,omitempty"`
+	Credentials       ForgeCredentials  `json:"credentials,omitempty"`
+	CredentialsID     uint              `json:"credentials_id,omitempty"`
+	PoolManagerStatus PoolManagerStatus `json:"pool_manager_status,omitempty"`
+	PoolBalancerType  PoolBalancerType  `json:"pool_balancing_type,omitempty"`
+	Endpoint          ForgeEndpoint     `json:"endpoint,omitempty"`
+	CreatedAt         time.Time         `json:"created_at,omitempty"`
+	UpdatedAt         time.Time         `json:"updated_at,omitempty"`
+	Events            []EntityEvent     `json:"events,omitempty"`
+	AgentMode         bool              `json:"agent_mode"`
+	// Do not serialize sensitive info.
+	WebhookSecret string `json:"-"`
+}
+
+func (f ForgeInstance) GetCreatedAt() time.Time {
+	return f.CreatedAt
+}
+
+func (f ForgeInstance) GetEntity() (ForgeEntity, error) {
+	if f.ID == "" {
+		return ForgeEntity{}, fmt.Errorf("forge instance has no ID")
+	}
+	return ForgeEntity{
+		ID:                f.ID,
+		EntityType:        ForgeEntityTypeInstance,
+		Owner:             f.Endpoint.Name,
+		WebhookSecret:     f.WebhookSecret,
+		PoolBalancerType:  f.PoolBalancerType,
+		PoolManagerStatus: f.PoolManagerStatus,
+		Credentials:       f.Credentials,
+		CreatedAt:         f.CreatedAt,
+		UpdatedAt:         f.UpdatedAt,
+		AgentMode:         f.AgentMode,
+	}, nil
+}
+
+func (f ForgeInstance) GetID() string {
+	return f.ID
+}
+
+func (f ForgeInstance) GetBalancerType() PoolBalancerType {
+	if f.PoolBalancerType == "" {
+		return PoolBalancerTypeRoundRobin
+	}
+	return f.PoolBalancerType
+}
+
+// used by swagger client generated code
+// swagger:model ForgeInstances
+type ForgeInstances []ForgeInstance
+
 // Users holds information about a particular user
 // swagger:model User
 type User struct {
@@ -1029,6 +1170,17 @@ type ControllerInfo struct {
 	GARMAgentReleasesURL string `json:"garm_agent_releases_url"`
 	// SyncGARMAgentTools enables or disables automatic sync of garm-agent tools.
 	SyncGARMAgentTools bool `json:"enable_agent_tools_sync"`
+	// GARMAgentVersion is the garm-agent version the controller uses. Empty or
+	// "latest" tracks the newest stable release available at GARMAgentReleasesURL.
+	// A specific semver version pins the release that gets cached and (when
+	// SyncGARMAgentTools is enabled) downloaded, for operators who want to
+	// stick with a known good agent version.
+	GARMAgentVersion string `json:"garm_agent_version"`
+	// AllowInsecureGARMAgent configures deployed garm-agents with
+	// force_insecure enabled, permitting them to connect back to GARM over
+	// plain http/ws when GARM itself does not use TLS. The agent token is
+	// sent in plain text; meant for local development and testing only.
+	AllowInsecureGARMAgent bool `json:"allow_insecure_garm_agent"`
 	// MinimumJobAgeBackoff is the minimum time in seconds that a job must be in queued state
 	// before GARM will attempt to allocate a runner for it. When set to a non zero value,
 	// GARM will ignore the job until the job's age is greater than this value. When using
@@ -1041,14 +1193,19 @@ type ControllerInfo struct {
 	// CACertBundle holds a certificate bundle meant to validate the certificate
 	// used by GARM itself. This can be just the root certificate that can validate
 	// the GARM TLS certificate, a chain or multiple root CAs.
+	//
+	// swagger:strfmt byte
 	CACertBundle []byte `json:"ca_cert_bundle,omitempty"`
-	// CachedGARMAgentReleaseFetchedAt is the timestamp when the release data was last fetched from GARMAgentReleasesURL
+	// CachedGARMAgentReleaseFetchedAt is the timestamp when the release index was last fetched from GARMAgentReleasesURL
 	CachedGARMAgentReleaseFetchedAt *time.Time `json:"cached_garm_agent_release_fetched_at,omitempty"`
-	// CachedGARMAgentRelease stores the cached JSON response from GARMAgentReleasesURL.
-	// This field is not serialized to JSON (internal use only).
-	CachedGARMAgentRelease []byte `json:"-"`
-	// CachedGARMAgentTools stores the parsed tools from CachedGARMAgentRelease, indexed by "os_type/os_arch".
-	// This field is not serialized to JSON (internal use only).
+	// CachedGARMAgentReleases stores the cached release index fetched from
+	// GARMAgentReleasesURL (a marshaled util.AgentReleaseIndex: the source URL
+	// plus the list of releases). This field is not serialized to JSON
+	// (internal use only).
+	CachedGARMAgentReleases []byte `json:"-"`
+	// CachedGARMAgentTools stores the tools of the resolved release (the pinned
+	// version, or the latest release when no pin is set), indexed by
+	// "os_type/os_arch". This field is not serialized to JSON (internal use only).
 	CachedGARMAgentTools map[string]GARMAgentTool `json:"-"`
 }
 
@@ -1107,16 +1264,27 @@ func (g GithubRateLimit) ResetAt() time.Time {
 
 // swagger:model ForgeCredentials
 type ForgeCredentials struct {
-	ID            uint          `json:"id,omitempty"`
-	Name          string        `json:"name,omitempty"`
-	Description   string        `json:"description,omitempty"`
-	APIBaseURL    string        `json:"api_base_url,omitempty"`
-	UploadBaseURL string        `json:"upload_base_url,omitempty"`
-	BaseURL       string        `json:"base_url,omitempty"`
-	CABundle      []byte        `json:"ca_bundle,omitempty"`
-	AuthType      ForgeAuthType `json:"auth-type,omitempty"`
+	ID            uint   `json:"id,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Description   string `json:"description,omitempty"`
+	APIBaseURL    string `json:"api_base_url,omitempty"`
+	UploadBaseURL string `json:"upload_base_url,omitempty"`
+	BaseURL       string `json:"base_url,omitempty"`
+	// swagger:strfmt byte
+	CABundle []byte        `json:"ca_bundle,omitempty"`
+	AuthType ForgeAuthType `json:"auth-type,omitempty"`
 
 	ForgeType EndpointType `json:"forge_type,omitempty"`
+
+	// ReserveUsageEnabled toggles whether or not to allocate a certain
+	// percentage of the available rate limit to critical operations such
+	// as delete operations for runners that have finished their jobs.
+	ReserveUsageEnabled bool `json:"reserve_usage_enabled,omitempty"`
+	// ReserveUsagePercentage is the percentage of available rate limit reserved
+	// for critical operations. Setting this value too high will negatively impact
+	// normal operations, so it is capped at 50%. A value between 5% and 20%
+	// should be safe on most setups. Adjust this based on your usage patterns.
+	ReserveUsagePercentage int `json:"reserve_usage_percentage,omitempty"`
 
 	Repositories  []Repository     `json:"repositories,omitempty"`
 	Organizations []Organization   `json:"organizations,omitempty"`
@@ -1132,6 +1300,52 @@ type ForgeCredentials struct {
 
 func (g ForgeCredentials) GetID() uint {
 	return g.ID
+}
+
+// reserveThreshold returns the number of API calls held in reserve for
+// critical operations (such as removing runners that finished their jobs).
+// Zero when usage reservation is disabled or no rate limit was observed.
+func (g ForgeCredentials) reserveThreshold() int {
+	if !g.ReserveUsageEnabled || g.RateLimit == nil {
+		return 0
+	}
+	return g.RateLimit.Limit * g.ReserveUsagePercentage / 100
+}
+
+// rateLimitReached reports whether the remaining quota has dropped to or
+// below the given threshold, and when the quota resets. The reset time is
+// returned whenever rate limit info was recorded, regardless of the verdict.
+// It is the zero time only when no info is available (Gitea, GHES with rate
+// limiting disabled, or no forge response observed yet). When no rate limits
+// are available, the credentials are considered unlimited. A quota whose
+// reset time has passed is treated as refreshed, even if we have not yet
+// observed a fresh response confirming it, otherwise a controller that
+// stopped making API calls due to the limit would never notice the reset.
+func (g ForgeCredentials) rateLimitReached(threshold int) (bool, time.Time) {
+	if g.RateLimit == nil || g.RateLimit.Limit == 0 {
+		return false, time.Time{}
+	}
+	resetAt := g.RateLimit.ResetAt()
+	if !time.Now().Before(resetAt) {
+		return false, resetAt
+	}
+	return g.RateLimit.Remaining <= threshold, resetAt
+}
+
+// RateLimitReached reports whether these credentials should be considered
+// rate limited for normal (non-critical) operations, and when the quota
+// resets. When usage reservation is enabled, normal operations are
+// considered limited once the remaining quota dips into the reserved
+// percentage, keeping the reserve available for critical operations.
+func (g ForgeCredentials) RateLimitReached() (bool, time.Time) {
+	return g.rateLimitReached(g.reserveThreshold())
+}
+
+// CriticalRateLimitReached reports whether even critical operations (such
+// as removing runners that finished their jobs) should back off, meaning
+// the quota is fully exhausted, and when it resets.
+func (g ForgeCredentials) CriticalRateLimitReached() (bool, time.Time) {
+	return g.rateLimitReached(0)
 }
 
 func (g ForgeCredentials) GetHTTPClient(ctx context.Context) (*http.Client, error) {
@@ -1298,9 +1512,10 @@ type Job struct {
 	// entity type, in response to one workflow event. Thus, we will get 3 webhooks
 	// with the same run_id and job id. Record all involved entities in the same job
 	// if we have them configured in garm.
-	RepoID       *uuid.UUID `json:"repo_id,omitempty"`
-	OrgID        *uuid.UUID `json:"org_id,omitempty"`
-	EnterpriseID *uuid.UUID `json:"enterprise_id,omitempty"`
+	RepoID          *uuid.UUID `json:"repo_id,omitempty"`
+	OrgID           *uuid.UUID `json:"org_id,omitempty"`
+	EnterpriseID    *uuid.UUID `json:"enterprise_id,omitempty"`
+	ForgeInstanceID *uuid.UUID `json:"forge_instance_id,omitempty"`
 
 	LockedBy uuid.UUID `json:"locked_by,omitempty"`
 
@@ -1321,6 +1536,10 @@ func (j Job) BelongsTo(entity ForgeEntity) bool {
 	case ForgeEntityTypeOrganization:
 		if j.OrgID != nil {
 			return entity.ID == j.OrgID.String()
+		}
+	case ForgeEntityTypeInstance:
+		if j.ForgeInstanceID != nil {
+			return entity.ID == j.ForgeInstanceID.String()
 		}
 	default:
 		return false
@@ -1359,15 +1578,16 @@ type UpdateSystemInfoParams struct {
 
 // swagger:model ForgeEntity
 type ForgeEntity struct {
+	ID                string            `json:"id,omitempty"`
+	Forge             ForgeEndpoint     `json:"forge"`
 	Owner             string            `json:"owner,omitempty"`
 	Name              string            `json:"name,omitempty"`
-	ID                string            `json:"id,omitempty"`
 	EntityType        ForgeEntityType   `json:"entity_type,omitempty"`
-	Credentials       ForgeCredentials  `json:"credentials,omitempty"`
-	PoolBalancerType  PoolBalancerType  `json:"pool_balancing_type,omitempty"`
-	PoolManagerStatus PoolManagerStatus `json:"pool_manager_status,omitempty"`
-	CreatedAt         time.Time         `json:"created_at,omitempty"`
-	UpdatedAt         time.Time         `json:"updated_at,omitempty"`
+	Credentials       ForgeCredentials  `json:"credentials"`
+	PoolBalancerType  PoolBalancerType  `json:"pool_balancing_type"`
+	PoolManagerStatus PoolManagerStatus `json:"pool_manager_status"`
+	CreatedAt         time.Time         `json:"created_at"`
+	UpdatedAt         time.Time         `json:"updated_at"`
 	AgentMode         bool              `json:"agent_mode"`
 
 	WebhookSecret string `json:"-"`
@@ -1418,6 +1638,8 @@ func (g ForgeEntity) LabelScope() string {
 		return MetricsLabelOrganizationScope
 	case ForgeEntityTypeEnterprise:
 		return MetricsLabelEnterpriseScope
+	case ForgeEntityTypeInstance:
+		return MetricsLabelInstanceScope
 	}
 	return ""
 }
@@ -1428,6 +1650,8 @@ func (g ForgeEntity) String() string {
 		return fmt.Sprintf("%s/%s", g.Owner, g.Name)
 	case ForgeEntityTypeOrganization, ForgeEntityTypeEnterprise:
 		return g.Owner
+	case ForgeEntityTypeInstance:
+		return g.Credentials.Endpoint.Name
 	}
 	return ""
 }
@@ -1449,11 +1673,12 @@ type ForgeEndpoints []ForgeEndpoint
 
 // swagger:model ForgeEndpoint
 type ForgeEndpoint struct {
-	Name                     string    `json:"name,omitempty"`
-	Description              string    `json:"description,omitempty"`
-	APIBaseURL               string    `json:"api_base_url,omitempty"`
-	UploadBaseURL            string    `json:"upload_base_url,omitempty"`
-	BaseURL                  string    `json:"base_url,omitempty"`
+	Name          string `json:"name,omitempty"`
+	Description   string `json:"description,omitempty"`
+	APIBaseURL    string `json:"api_base_url,omitempty"`
+	UploadBaseURL string `json:"upload_base_url,omitempty"`
+	BaseURL       string `json:"base_url,omitempty"`
+	// swagger:strfmt byte
 	CACertBundle             []byte    `json:"ca_cert_bundle,omitempty"`
 	CreatedAt                time.Time `json:"created_at,omitempty"`
 	UpdatedAt                time.Time `json:"updated_at,omitempty"`
@@ -1479,6 +1704,10 @@ type EnterpriseFilter struct {
 	Endpoint string
 }
 
+type ForgeInstanceFilter struct {
+	Endpoint string
+}
+
 // swagger:model Template
 type Template struct {
 	ID        uint      `json:"id"`
@@ -1489,13 +1718,81 @@ type Template struct {
 	Description string              `json:"description"`
 	OSType      commonParams.OSType `json:"os_type"`
 	ForgeType   EndpointType        `json:"forge_type,omitempty"`
-	Data        []byte              `json:"data"`
-	Owner       string              `json:"owner_id,omitempty"`
+	// swagger:strfmt byte
+	Data  []byte `json:"data"`
+	Owner string `json:"owner_id,omitempty"`
 }
 
 // used by swagger client generated code
 // swagger:model Templates
 type Templates []Template
+
+// swagger:model Proxy
+type Proxy struct {
+	ID        uint      `json:"id"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+
+	Name        string `json:"name"`
+	Description string `json:"description,omitempty"`
+
+	// HTTPProxy is the proxy URL used for plain HTTP requests.
+	HTTPProxy string `json:"http_proxy,omitempty"`
+	// HTTPSProxy is the proxy URL used for HTTPS requests.
+	HTTPSProxy string `json:"https_proxy,omitempty"`
+	// NoProxy is a comma separated list of hosts, domains or CIDRs for
+	// which the proxy should be bypassed.
+	NoProxy string `json:"no_proxy,omitempty"`
+
+	// Username is the username used to authenticate to the proxy. If set,
+	// it will be composed into the final proxy URLs handed to runners.
+	Username string `json:"username,omitempty"`
+	// Password is the password used to authenticate to the proxy. This
+	// field is never serialized. Secrets are not echoed back via the API.
+	Password string `json:"-"`
+}
+
+func (p Proxy) GetID() uint {
+	return p.ID
+}
+
+// HasCredentials returns true if the proxy definition has credentials set.
+func (p Proxy) HasCredentials() bool {
+	return p.Username != ""
+}
+
+// composeProxyURL embeds the proxy credentials (if any) into the given proxy
+// URL. The URL is assumed to have been validated at create/update time.
+func (p Proxy) composeProxyURL(proxyURL string) string {
+	if proxyURL == "" || !p.HasCredentials() {
+		return proxyURL
+	}
+	parsed, err := url.Parse(proxyURL)
+	if err != nil {
+		return proxyURL
+	}
+	if p.Password != "" {
+		parsed.User = url.UserPassword(p.Username, p.Password)
+	} else {
+		parsed.User = url.User(p.Username)
+	}
+	return parsed.String()
+}
+
+// ProxyConfig composes the final proxy configuration that gets handed to
+// providers as part of the bootstrap params. Credentials, if set, are
+// embedded into the proxy URLs.
+func (p Proxy) ProxyConfig() commonParams.ProxyConfig {
+	return commonParams.ProxyConfig{
+		HTTPProxy:  p.composeProxyURL(p.HTTPProxy),
+		HTTPSProxy: p.composeProxyURL(p.HTTPSProxy),
+		NoProxy:    p.NoProxy,
+	}
+}
+
+// used by swagger client generated code
+// swagger:model Proxies
+type Proxies []Proxy
 
 // swagger:model FileObject
 type FileObject struct {
@@ -1558,6 +1855,50 @@ type GARMAgentTool struct {
 
 // swagger:model GARMAgentToolsPaginatedResponse
 type GARMAgentToolsPaginatedResponse = PaginatedResponse[GARMAgentTool]
+
+// GARMAgentRelease describes one garm-agent release available at the
+// controller's releases URL, as recorded in the cached release index.
+//
+// swagger:model GARMAgentRelease
+type GARMAgentRelease struct {
+	// Version is the release tag.
+	Version string `json:"version"`
+	// Prerelease indicates the release is marked as a pre-release upstream.
+	Prerelease bool `json:"prerelease"`
+	// OSArchs lists the "os_type/os_arch" combinations the release ships
+	// agent binaries for.
+	OSArchs []string `json:"os_archs,omitempty"`
+	// Pinned indicates this is the version the controller is pinned to.
+	Pinned bool `json:"pinned"`
+	// Latest indicates this is the release "latest" currently resolves to.
+	Latest bool `json:"latest"`
+	// ReleaseNotes holds the release description as published upstream
+	// (typically markdown), so operators can see what changed in a release
+	// before pinning to it.
+	ReleaseNotes string `json:"release_notes,omitempty"`
+	// Assets lists the downloadable binaries the release ships. Checksum
+	// files are omitted; the digest of each asset is included instead.
+	Assets []GARMAgentReleaseAsset `json:"assets,omitempty"`
+}
+
+// GARMAgentReleaseAsset describes one downloadable binary of a garm-agent
+// release.
+//
+// swagger:model GARMAgentReleaseAsset
+type GARMAgentReleaseAsset struct {
+	// Name is the file name of the asset.
+	Name string `json:"name"`
+	// Size is the size of the asset in bytes.
+	Size uint `json:"size"`
+	// Digest is the checksum of the asset as declared upstream (typically
+	// "sha256:<hex>").
+	Digest string `json:"digest,omitempty"`
+	// DownloadURL is the upstream URL the asset can be downloaded from.
+	DownloadURL string `json:"download_url"`
+}
+
+// swagger:model GARMAgentReleases
+type GARMAgentReleases []GARMAgentRelease
 
 // swagger:model MetadataServiceAccessDetails
 type MetadataServiceAccessDetails struct {

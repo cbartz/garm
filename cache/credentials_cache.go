@@ -14,108 +14,59 @@
 package cache
 
 import (
-	"sync"
+	"time"
 
 	"github.com/cloudbase/garm/params"
 )
 
 var (
-	credentialsCache      *CredentialCache
-	giteaCredentialsCache *CredentialCache
+	credentialsCache      = &credentialCache{newKeyedCache[uint, params.ForgeCredentials](0)}
+	giteaCredentialsCache = &credentialCache{newKeyedCache[uint, params.ForgeCredentials](0)}
 )
 
-func init() {
-	ghCredentialsCache := &CredentialCache{
-		cache: make(map[uint]params.ForgeCredentials),
-	}
-	gtCredentialsCache := &CredentialCache{
-		cache: make(map[uint]params.ForgeCredentials),
-	}
-
-	credentialsCache = ghCredentialsCache
-	giteaCredentialsCache = gtCredentialsCache
+// credentialCache adds the credentials specific compound operations on top
+// of the generic cache. Setting credentials also refreshes the credentials
+// embedded in cached entities.
+type credentialCache struct {
+	*keyedCache[uint, params.ForgeCredentials]
 }
 
-type CredentialCache struct {
-	mux sync.Mutex
-
-	cache map[uint]params.ForgeCredentials
-}
-
-func (g *CredentialCache) SetCredentialsRateLimit(credsID uint, rateLimit params.GithubRateLimit) {
-	g.mux.Lock()
-	defer g.mux.Unlock()
-
-	if creds, ok := g.cache[credsID]; ok {
-		creds.RateLimit = &rateLimit
-		g.cache[credsID] = creds
-	}
-}
-
-func (g *CredentialCache) UpdateCredentialsUsingEndpoint(ep params.ForgeEndpoint) {
-	g.mux.Lock()
-	defer g.mux.Unlock()
-
-	for _, creds := range g.cache {
-		if creds.Endpoint.Name == ep.Name {
-			creds.Endpoint = ep
-			g.setCredentialsAndUpdateEntities(creds)
+func (g *credentialCache) SetCredentialsRateLimit(credsID uint, rateLimit params.GithubRateLimit) {
+	g.Update(func(cache map[uint]params.ForgeCredentials) {
+		if creds, ok := cache[credsID]; ok {
+			creds.RateLimit = &rateLimit
+			cache[credsID] = creds
 		}
-	}
+	})
 }
 
-func (g *CredentialCache) setCredentialsAndUpdateEntities(credentials params.ForgeCredentials) {
-	g.cache[credentials.ID] = credentials
-	UpdateCredentialsInAffectedEntities(credentials)
+func (g *credentialCache) UpdateCredentialsUsingEndpoint(ep params.ForgeEndpoint) {
+	g.Update(func(cache map[uint]params.ForgeCredentials) {
+		for _, creds := range cache {
+			if creds.Endpoint.Name == ep.Name {
+				creds.Endpoint = ep
+				cache[creds.ID] = creds
+				UpdateCredentialsInAffectedEntities(creds)
+			}
+		}
+	})
 }
 
-func (g *CredentialCache) SetCredentials(credentials params.ForgeCredentials) {
-	g.mux.Lock()
-	defer g.mux.Unlock()
-
-	g.setCredentialsAndUpdateEntities(credentials)
+func (g *credentialCache) SetCredentials(credentials params.ForgeCredentials) {
+	g.Update(func(cache map[uint]params.ForgeCredentials) {
+		// Credentials sourced from the database carry no rate limit info, so
+		// an update clears the recorded values. That is fine as an update may
+		// be a token swap, and rate limits are per token. The clients record
+		// fresh values on every forge response and the cache worker's rate
+		// limit loop repolls within 30 seconds either way.
+		cache[credentials.ID] = credentials
+		UpdateCredentialsInAffectedEntities(credentials)
+	})
 }
 
-func (g *CredentialCache) GetCredentials(id uint) (params.ForgeCredentials, bool) {
-	g.mux.Lock()
-	defer g.mux.Unlock()
-
-	if creds, ok := g.cache[id]; ok {
-		return creds, true
-	}
-	return params.ForgeCredentials{}, false
-}
-
-func (g *CredentialCache) DeleteCredentials(id uint) {
-	g.mux.Lock()
-	defer g.mux.Unlock()
-
-	delete(g.cache, id)
-}
-
-func (g *CredentialCache) GetAllCredentials() []params.ForgeCredentials {
-	g.mux.Lock()
-	defer g.mux.Unlock()
-
-	creds := make([]params.ForgeCredentials, 0, len(g.cache))
-	for _, cred := range g.cache {
-		creds = append(creds, cred)
-	}
-
-	// Sort the credentials by ID
+func (g *credentialCache) GetAllCredentials() []params.ForgeCredentials {
+	creds := g.List()
 	sortByID(creds)
-	return creds
-}
-
-func (g *CredentialCache) GetAllCredentialsAsMap() map[uint]params.ForgeCredentials {
-	g.mux.Lock()
-	defer g.mux.Unlock()
-
-	creds := make(map[uint]params.ForgeCredentials, len(g.cache))
-	for id, cred := range g.cache {
-		creds[id] = cred
-	}
-
 	return creds
 }
 
@@ -124,11 +75,11 @@ func SetGithubCredentials(credentials params.ForgeCredentials) {
 }
 
 func GetGithubCredentials(id uint) (params.ForgeCredentials, bool) {
-	return credentialsCache.GetCredentials(id)
+	return credentialsCache.Get(id)
 }
 
 func DeleteGithubCredentials(id uint) {
-	credentialsCache.DeleteCredentials(id)
+	credentialsCache.Delete(id)
 }
 
 func GetAllGithubCredentials() []params.ForgeCredentials {
@@ -140,7 +91,7 @@ func SetCredentialsRateLimit(credsID uint, rateLimit params.GithubRateLimit) {
 }
 
 func GetAllGithubCredentialsAsMap() map[uint]params.ForgeCredentials {
-	return credentialsCache.GetAllCredentialsAsMap()
+	return credentialsCache.AsMap()
 }
 
 func SetGiteaCredentials(credentials params.ForgeCredentials) {
@@ -148,11 +99,11 @@ func SetGiteaCredentials(credentials params.ForgeCredentials) {
 }
 
 func GetGiteaCredentials(id uint) (params.ForgeCredentials, bool) {
-	return giteaCredentialsCache.GetCredentials(id)
+	return giteaCredentialsCache.Get(id)
 }
 
 func DeleteGiteaCredentials(id uint) {
-	giteaCredentialsCache.DeleteCredentials(id)
+	giteaCredentialsCache.Delete(id)
 }
 
 func GetAllGiteaCredentials() []params.ForgeCredentials {
@@ -160,9 +111,58 @@ func GetAllGiteaCredentials() []params.ForgeCredentials {
 }
 
 func GetAllGiteaCredentialsAsMap() map[uint]params.ForgeCredentials {
-	return giteaCredentialsCache.GetAllCredentialsAsMap()
+	return giteaCredentialsCache.AsMap()
 }
 
 func UpdateCredentialsUsingEndpoint(ep params.ForgeEndpoint) {
 	giteaCredentialsCache.UpdateCredentialsUsingEndpoint(ep)
+}
+
+// GetForgeCredentials returns the cached credentials with the given ID for
+// the specified forge type. Unlike the copies workers hold on their entities,
+// the cached credentials carry the most recently observed rate limit values.
+func GetForgeCredentials(forgeType params.EndpointType, id uint) (params.ForgeCredentials, bool) {
+	switch forgeType {
+	case params.GithubEndpointType:
+		return GetGithubCredentials(id)
+	case params.GiteaEndpointType:
+		return GetGiteaCredentials(id)
+	}
+	return params.ForgeCredentials{}, false
+}
+
+// entityCredentials resolves the freshest credentials for an entity: the
+// entity cache tracks credential swaps, and the credentials cache carries
+// the most recently observed rate limit values. Workers hold set-once
+// copies of both, so rate limit checks must go through here.
+func entityCredentials(entityID string) (params.ForgeCredentials, bool) {
+	entity, ok := GetEntity(entityID)
+	if !ok {
+		return params.ForgeCredentials{}, false
+	}
+	return GetForgeCredentials(entity.Credentials.ForgeType, entity.Credentials.ID)
+}
+
+// EntityRateLimitReached reports whether the credentials currently assigned
+// to the given entity should be considered rate limited for normal
+// (non-critical) operations, and when the quota resets. Entities or
+// credentials missing from the cache are never limited.
+func EntityRateLimitReached(entityID string) (bool, time.Time) {
+	creds, ok := entityCredentials(entityID)
+	if !ok {
+		return false, time.Time{}
+	}
+	return creds.RateLimitReached()
+}
+
+// EntityRateLimitExhausted reports whether the quota of the credentials
+// currently assigned to the given entity is fully spent, meaning even
+// critical operations cannot succeed, and when it resets. Entities or
+// credentials missing from the cache are never limited.
+func EntityRateLimitExhausted(entityID string) (bool, time.Time) {
+	creds, ok := entityCredentials(entityID)
+	if !ok {
+		return false, time.Time{}
+	}
+	return creds.CriticalRateLimitReached()
 }

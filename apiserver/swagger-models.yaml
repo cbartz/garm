@@ -215,6 +215,29 @@ definitions:
         import:
             package: github.com/cloudbase/garm/params
             alias: garm_params
+  ForgeInstances:
+    type: array
+    x-go-type:
+        type: ForgeInstances
+        import:
+            package: github.com/cloudbase/garm/params
+            alias: garm_params
+    items:
+        $ref: '#/definitions/ForgeInstance'
+  ForgeInstance:
+    type: object
+    x-go-type:
+        type: ForgeInstance
+        import:
+            package: github.com/cloudbase/garm/params
+            alias: garm_params
+  CreateForgeInstanceParams:
+    type: object
+    x-go-type:
+        type: CreateForgeInstanceParams
+        import:
+            package: github.com/cloudbase/garm/params
+            alias: garm_params
   UpdateEntityParams:
     type: object
     x-go-type:
@@ -408,6 +431,36 @@ definitions:
         import:
             package: github.com/cloudbase/garm/params
             alias: garm_params
+  Proxy:
+    type: object
+    x-go-type:
+        type: Proxy
+        import:
+            package: github.com/cloudbase/garm/params
+            alias: garm_params
+  Proxies:
+    type: array
+    x-go-type:
+        type: Proxies
+        import:
+            package: github.com/cloudbase/garm/params
+            alias: garm_params
+    items:
+        $ref: '#/definitions/Proxy'
+  CreateProxyParams:
+    type: object
+    x-go-type:
+        type: CreateProxyParams
+        import:
+            package: github.com/cloudbase/garm/params
+            alias: garm_params
+  UpdateProxyParams:
+    type: object
+    x-go-type:
+        type: UpdateProxyParams
+        import:
+            package: github.com/cloudbase/garm/params
+            alias: garm_params
   GARMAgentToolsPaginatedResponse:
     type: object
     x-go-type:
@@ -419,6 +472,22 @@ definitions:
     type: object
     x-go-type:
         type: GARMAgentTool
+        import:
+            package: github.com/cloudbase/garm/params
+            alias: garm_params
+  GARMAgentReleases:
+    type: array
+    x-go-type:
+        type: GARMAgentReleases
+        import:
+            package: github.com/cloudbase/garm/params
+            alias: garm_params
+    items:
+        $ref: '#/definitions/GARMAgentRelease'
+  GARMAgentRelease:
+    type: object
+    x-go-type:
+        type: GARMAgentRelease
         import:
             package: github.com/cloudbase/garm/params
             alias: garm_params

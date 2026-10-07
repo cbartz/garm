@@ -151,6 +151,17 @@ func (w *Worker) loadAllEntities() error {
 		}
 	}
 
+	forgeInstances, err := w.store.ListForgeInstances(w.ctx, params.ForgeInstanceFilter{})
+	if err != nil {
+		return fmt.Errorf("listing forge instances: %w", err)
+	}
+
+	for _, fi := range forgeInstances {
+		if err := w.setCacheForEntity(fi, pools, scaleSets); err != nil {
+			return fmt.Errorf("setting cache for forge instance: %w", err)
+		}
+	}
+
 	for _, entity := range cache.GetAllEntities() {
 		worker := newToolsUpdater(w.ctx, entity, w.store)
 		if err := worker.Start(); err != nil {
@@ -169,6 +180,18 @@ func (w *Worker) loadAllInstances() error {
 
 	for _, instance := range instances {
 		cache.SetInstanceCache(instance)
+	}
+	return nil
+}
+
+func (w *Worker) loadAllProxies() error {
+	proxies, err := w.store.ListProxies(w.ctx)
+	if err != nil {
+		return fmt.Errorf("listing proxies: %w", err)
+	}
+
+	for _, proxy := range proxies {
+		cache.SetProxyCache(proxy)
 	}
 	return nil
 }
@@ -263,6 +286,13 @@ func (w *Worker) Start() error {
 	g.Go(func() error {
 		if err := w.loadAllInstances(); err != nil {
 			return fmt.Errorf("loading all instances: %w", err)
+		}
+		return nil
+	})
+
+	g.Go(func() error {
+		if err := w.loadAllProxies(); err != nil {
+			return fmt.Errorf("loading all proxies: %w", err)
 		}
 		return nil
 	})
@@ -382,6 +412,15 @@ func (w *Worker) handleEnterpriseEvent(event common.ChangePayload) {
 	w.handleEntityEvent(enterprise, event.Operation)
 }
 
+func (w *Worker) handleForgeInstanceEvent(event common.ChangePayload) {
+	fi, ok := event.Payload.(params.ForgeInstance)
+	if !ok {
+		slog.DebugContext(w.ctx, "invalid payload type for forge instance event", "payload", event.Payload)
+		return
+	}
+	w.handleEntityEvent(fi, event.Operation)
+}
+
 func (w *Worker) handlePoolEvent(event common.ChangePayload) {
 	pool, ok := event.Payload.(params.Pool)
 	if !ok {
@@ -447,6 +486,20 @@ func (w *Worker) handleTemplateEvent(event common.ChangePayload) {
 		cache.SetTemplateCache(template)
 	case common.DeleteOperation:
 		cache.DeleteTemplate(template.ID)
+	}
+}
+
+func (w *Worker) handleProxyEvent(event common.ChangePayload) {
+	proxy, ok := event.Payload.(params.Proxy)
+	if !ok {
+		slog.DebugContext(w.ctx, "invalid payload type for proxy event", "payload", event.Payload)
+		return
+	}
+	switch event.Operation {
+	case common.CreateOperation, common.UpdateOperation:
+		cache.SetProxyCache(proxy)
+	case common.DeleteOperation:
+		cache.DeleteProxy(proxy.ID)
 	}
 }
 
@@ -529,12 +582,16 @@ func (w *Worker) handleEvent(event common.ChangePayload) {
 		w.handleOrgEvent(event)
 	case common.EnterpriseEntityType:
 		w.handleEnterpriseEvent(event)
+	case common.ForgeInstanceEntityType:
+		w.handleForgeInstanceEvent(event)
 	case common.GithubCredentialsEntityType, common.GiteaCredentialsEntityType:
 		w.handleCredentialsEvent(event)
 	case common.ControllerEntityType:
 		w.handleControllerInfoEvent(event)
 	case common.TemplateEntityType:
 		w.handleTemplateEvent(event)
+	case common.ProxyEntityType:
+		w.handleProxyEvent(event)
 	case common.GithubEndpointEntityType:
 		w.handleEndpointEvent(event)
 	default:
@@ -582,7 +639,7 @@ func (w *Worker) rateLimitLoop() {
 					slog.With(slog.Any("error", err)).ErrorContext(w.ctx, "failed to create rate limit client")
 					continue
 				}
-				rateLimit, err := rateCli.RateLimit(w.ctx)
+				rateLimit, tokenExpiration, err := rateCli.RateLimit(w.ctx)
 				if err != nil {
 					slog.With(slog.Any("error", err)).ErrorContext(w.ctx, "failed to get rate limit")
 					continue
@@ -615,6 +672,13 @@ func (w *Worker) rateLimitLoop() {
 					metrics.GithubRateLimitRemaining.With(labels).Set(float64(core.Remaining))
 					metrics.GithubRateLimitUsed.With(labels).Set(float64(core.Used))
 					metrics.GithubRateLimitResetTimestamp.With(labels).Set(float64(core.Reset.Unix()))
+
+					// Only PATs have a meaningful expiration to alert on.
+					// App credentials rotate their tokens automatically, so
+					// an expiration there is expected and not actionable.
+					if creds.AuthType == params.ForgeAuthTypePAT && !tokenExpiration.IsZero() {
+						metrics.GithubTokenExpirationTimestamp.With(labels).Set(float64(tokenExpiration.Unix()))
+					}
 				}
 			}
 		}

@@ -39,18 +39,24 @@ definitions:
                     URL must be configured to allow websocket connections.
                 type: string
                 x-go-name: AgentURL
+            allow_insecure_garm_agent:
+                description: |-
+                    AllowInsecureGARMAgent configures deployed garm-agents with
+                    force_insecure enabled, permitting them to connect back to GARM over
+                    plain http/ws when GARM itself does not use TLS. The agent token is
+                    sent in plain text; meant for local development and testing only.
+                type: boolean
+                x-go-name: AllowInsecureGARMAgent
             ca_cert_bundle:
                 description: |-
                     CACertBundle holds a certificate bundle meant to validate the certificate
                     used by GARM itself. This can be just the root certificate that can validate
                     the GARM TLS certificate, a chain or multiple root CAs.
-                items:
-                    format: uint8
-                    type: integer
-                type: array
+                format: byte
+                type: string
                 x-go-name: CACertBundle
             cached_garm_agent_release_fetched_at:
-                description: CachedGARMAgentReleaseFetchedAt is the timestamp when the release data was last fetched from GARMAgentReleasesURL
+                description: CachedGARMAgentReleaseFetchedAt is the timestamp when the release index was last fetched from GARMAgentReleasesURL
                 format: date-time
                 type: string
                 x-go-name: CachedGARMAgentReleaseFetchedAt
@@ -89,6 +95,15 @@ definitions:
                     The default value for this field is: https://api.github.com/repos/cloudbase/garm-agent/releases
                 type: string
                 x-go-name: GARMAgentReleasesURL
+            garm_agent_version:
+                description: |-
+                    GARMAgentVersion is the garm-agent version the controller uses. Empty or
+                    "latest" tracks the newest stable release available at GARMAgentReleasesURL.
+                    A specific semver version pins the release that gets cached and (when
+                    SyncGARMAgentTools is enabled) downloaded, for operators who want to
+                    stick with a known good agent version.
+                type: string
+                x-go-name: GARMAgentVersion
             hostname:
                 description: |-
                     Hostname is the hostname of the machine that runs this controller. In the
@@ -170,6 +185,26 @@ definitions:
                 x-go-name: Tags
         type: object
         x-go-package: github.com/cloudbase/garm/params
+    CreateForgeInstanceParams:
+        properties:
+            agent_mode:
+                type: boolean
+                x-go-name: AgentMode
+            credentials_name:
+                type: string
+                x-go-name: CredentialsName
+            endpoint_name:
+                type: string
+                x-go-name: EndpointName
+            forge_type:
+                $ref: '#/definitions/EndpointType'
+            pool_balancer_type:
+                $ref: '#/definitions/PoolBalancerType'
+            webhook_secret:
+                type: string
+                x-go-name: WebhookSecret
+        type: object
+        x-go-package: github.com/cloudbase/garm/params
     CreateGARMToolParams:
         properties:
             description:
@@ -222,10 +257,8 @@ definitions:
                 type: string
                 x-go-name: BaseURL
             ca_cert_bundle:
-                items:
-                    format: uint8
-                    type: integer
-                type: array
+                format: byte
+                type: string
                 x-go-name: CACertBundle
             description:
                 type: string
@@ -258,6 +291,22 @@ definitions:
                 x-go-name: Name
             pat:
                 $ref: '#/definitions/GithubPAT'
+            reserve_usage_enabled:
+                description: |-
+                    ReserveUsageEnabled toggles whether or not to allocate a certain
+                    percentage of the available rate limit to critical operations such
+                    as delete operations for runners that have finished their jobs.
+                type: boolean
+                x-go-name: ReserveUsageEnabled
+            reserve_usage_percentage:
+                description: |-
+                    ReserveUsagePercentage is the percentage of available rate limit reserved
+                    for critical operations. Setting this value too high will negatively impact
+                    normal operations, so it is capped at 50%. A value between 5% and 20%
+                    should be safe on most setups. Adjust this based on your usage patterns.
+                format: int64
+                type: integer
+                x-go-name: ReserveUsagePercentage
         type: object
         x-go-package: github.com/cloudbase/garm/params
     CreateGithubEndpointParams:
@@ -269,10 +318,8 @@ definitions:
                 type: string
                 x-go-name: BaseURL
             ca_cert_bundle:
-                items:
-                    format: uint8
-                    type: integer
-                type: array
+                format: byte
+                type: string
                 x-go-name: CACertBundle
             description:
                 type: string
@@ -348,6 +395,11 @@ definitions:
             provider_name:
                 type: string
                 x-go-name: ProviderName
+            proxy_id:
+                description: ProxyID is the ID of the proxy definition runners in this pool will use.
+                format: uint64
+                type: integer
+                x-go-name: ProxyID
             runner_bootstrap_timeout:
                 format: uint64
                 type: integer
@@ -364,6 +416,38 @@ definitions:
                 format: uint64
                 type: integer
                 x-go-name: TemplateID
+        type: object
+        x-go-package: github.com/cloudbase/garm/params
+    CreateProxyParams:
+        properties:
+            description:
+                type: string
+                x-go-name: Description
+            http_proxy:
+                description: HTTPProxy is the proxy URL used for plain HTTP requests.
+                type: string
+                x-go-name: HTTPProxy
+            https_proxy:
+                description: HTTPSProxy is the proxy URL used for HTTPS requests.
+                type: string
+                x-go-name: HTTPSProxy
+            name:
+                type: string
+                x-go-name: Name
+            no_proxy:
+                description: |-
+                    NoProxy is a comma separated list of hosts, domains or CIDRs for
+                    which the proxy should be bypassed.
+                type: string
+                x-go-name: NoProxy
+            password:
+                description: Password is the password used to authenticate to the proxy.
+                type: string
+                x-go-name: Password
+            username:
+                description: Username is the username used to authenticate to the proxy.
+                type: string
+                x-go-name: Username
         type: object
         x-go-package: github.com/cloudbase/garm/params
     CreateRepoParams:
@@ -439,6 +523,13 @@ definitions:
             provider_name:
                 type: string
                 x-go-name: ProviderName
+            proxy_id:
+                description: |-
+                    ProxyID is the ID of the proxy definition runners in this scale set
+                    will use.
+                format: uint64
+                type: integer
+                x-go-name: ProxyID
             runner_bootstrap_timeout:
                 format: uint64
                 type: integer
@@ -459,10 +550,8 @@ definitions:
     CreateTemplateParams:
         properties:
             data:
-                items:
-                    format: uint8
-                    type: integer
-                type: array
+                format: byte
+                type: string
                 x-go-name: Data
             description:
                 type: string
@@ -680,10 +769,8 @@ definitions:
                 type: string
                 x-go-name: BaseURL
             ca_bundle:
-                items:
-                    format: uint8
-                    type: integer
-                type: array
+                format: byte
+                type: string
                 x-go-name: CABundle
             created_at:
                 format: date-time
@@ -720,6 +807,22 @@ definitions:
                     $ref: '#/definitions/Repository'
                 type: array
                 x-go-name: Repositories
+            reserve_usage_enabled:
+                description: |-
+                    ReserveUsageEnabled toggles whether or not to allocate a certain
+                    percentage of the available rate limit to critical operations such
+                    as delete operations for runners that have finished their jobs.
+                type: boolean
+                x-go-name: ReserveUsageEnabled
+            reserve_usage_percentage:
+                description: |-
+                    ReserveUsagePercentage is the percentage of available rate limit reserved
+                    for critical operations. Setting this value too high will negatively impact
+                    normal operations, so it is capped at 50%. A value between 5% and 20%
+                    should be safe on most setups. Adjust this based on your usage patterns.
+                format: int64
+                type: integer
+                x-go-name: ReserveUsagePercentage
             updated_at:
                 format: date-time
                 type: string
@@ -738,10 +841,8 @@ definitions:
                 type: string
                 x-go-name: BaseURL
             ca_cert_bundle:
-                items:
-                    format: uint8
-                    type: integer
-                type: array
+                format: byte
+                type: string
                 x-go-name: CACertBundle
             created_at:
                 format: date-time
@@ -789,6 +890,8 @@ definitions:
                 $ref: '#/definitions/ForgeCredentials'
             entity_type:
                 $ref: '#/definitions/ForgeEntityType'
+            forge:
+                $ref: '#/definitions/ForgeEndpoint'
             id:
                 type: string
                 x-go-name: ID
@@ -810,6 +913,136 @@ definitions:
         x-go-package: github.com/cloudbase/garm/params
     ForgeEntityType:
         type: string
+        x-go-package: github.com/cloudbase/garm/params
+    ForgeInstance:
+        properties:
+            agent_mode:
+                type: boolean
+                x-go-name: AgentMode
+            created_at:
+                format: date-time
+                type: string
+                x-go-name: CreatedAt
+            credentials:
+                $ref: '#/definitions/ForgeCredentials'
+            credentials_id:
+                format: uint64
+                type: integer
+                x-go-name: CredentialsID
+            credentials_name:
+                description: |-
+                    CredentialName is the name of the credentials associated with the forge instance.
+                    This field is now deprecated. Use CredentialsID instead. This field will be
+                    removed in v0.2.0.
+                type: string
+                x-go-name: CredentialsName
+            endpoint:
+                $ref: '#/definitions/ForgeEndpoint'
+            events:
+                items:
+                    $ref: '#/definitions/EntityEvent'
+                type: array
+                x-go-name: Events
+            id:
+                type: string
+                x-go-name: ID
+            pool:
+                items:
+                    $ref: '#/definitions/Pool'
+                type: array
+                x-go-name: Pools
+            pool_balancing_type:
+                $ref: '#/definitions/PoolBalancerType'
+            pool_manager_status:
+                $ref: '#/definitions/PoolManagerStatus'
+            updated_at:
+                format: date-time
+                type: string
+                x-go-name: UpdatedAt
+        type: object
+        x-go-package: github.com/cloudbase/garm/params
+    ForgeInstances:
+        description: used by swagger client generated code
+        items:
+            $ref: '#/definitions/ForgeInstance'
+        type: array
+        x-go-package: github.com/cloudbase/garm/params
+    GARMAgentRelease:
+        description: |-
+            GARMAgentRelease describes one garm-agent release available at the
+            controller's releases URL, as recorded in the cached release index.
+        properties:
+            assets:
+                description: |-
+                    Assets lists the downloadable binaries the release ships. Checksum
+                    files are omitted; the digest of each asset is included instead.
+                items:
+                    $ref: '#/definitions/GARMAgentReleaseAsset'
+                type: array
+                x-go-name: Assets
+            latest:
+                description: Latest indicates this is the release "latest" currently resolves to.
+                type: boolean
+                x-go-name: Latest
+            os_archs:
+                description: |-
+                    OSArchs lists the "os_type/os_arch" combinations the release ships
+                    agent binaries for.
+                items:
+                    type: string
+                type: array
+                x-go-name: OSArchs
+            pinned:
+                description: Pinned indicates this is the version the controller is pinned to.
+                type: boolean
+                x-go-name: Pinned
+            prerelease:
+                description: Prerelease indicates the release is marked as a pre-release upstream.
+                type: boolean
+                x-go-name: Prerelease
+            release_notes:
+                description: |-
+                    ReleaseNotes holds the release description as published upstream
+                    (typically markdown), so operators can see what changed in a release
+                    before pinning to it.
+                type: string
+                x-go-name: ReleaseNotes
+            version:
+                description: Version is the release tag.
+                type: string
+                x-go-name: Version
+        type: object
+        x-go-package: github.com/cloudbase/garm/params
+    GARMAgentReleaseAsset:
+        description: |-
+            GARMAgentReleaseAsset describes one downloadable binary of a garm-agent
+            release.
+        properties:
+            digest:
+                description: |-
+                    Digest is the checksum of the asset as declared upstream (typically
+                    "sha256:<hex>").
+                type: string
+                x-go-name: Digest
+            download_url:
+                description: DownloadURL is the upstream URL the asset can be downloaded from.
+                type: string
+                x-go-name: DownloadURL
+            name:
+                description: Name is the file name of the asset.
+                type: string
+                x-go-name: Name
+            size:
+                description: Size is the size of the asset in bytes.
+                format: uint64
+                type: integer
+                x-go-name: Size
+        type: object
+        x-go-package: github.com/cloudbase/garm/params
+    GARMAgentReleases:
+        items:
+            $ref: '#/definitions/GARMAgentRelease'
+        type: array
         x-go-package: github.com/cloudbase/garm/params
     GARMAgentTool:
         properties:
@@ -966,10 +1199,8 @@ definitions:
                 type: integer
                 x-go-name: InstallationID
             private_key_bytes:
-                items:
-                    format: uint8
-                    type: integer
-                type: array
+                format: byte
+                type: string
                 x-go-name: PrivateKeyBytes
         type: object
         x-go-package: github.com/cloudbase/garm/params
@@ -1108,10 +1339,8 @@ definitions:
                 description: |-
                     ProviderFault holds any error messages captured from the IaaS provider that is
                     responsible for managing the lifecycle of the runner.
-                items:
-                    format: uint8
-                    type: integer
-                type: array
+                format: byte
+                type: string
                 x-go-name: ProviderFault
             provider_id:
                 description: |-
@@ -1252,6 +1481,10 @@ definitions:
                 format: uuid
                 type: string
                 x-go-name: EnterpriseID
+            forge_instance_id:
+                format: uuid
+                type: string
+                x-go-name: ForgeInstanceID
             id:
                 description: ID is the ID of the job.
                 format: int64
@@ -1482,6 +1715,9 @@ definitions:
             flavor:
                 type: string
                 x-go-name: Flavor
+            forge_instance_id:
+                type: string
+                x-go-name: ForgeInstanceID
             generation:
                 description: |-
                     Generation holds the numeric generation of the pool. This number
@@ -1539,6 +1775,17 @@ definitions:
             provider_name:
                 type: string
                 x-go-name: ProviderName
+            proxy_id:
+                description: |-
+                    ProxyID is the ID of the proxy definition that will be used by runners
+                    spawned in this pool. Runners will use the proxy settings to reach back
+                    to GARM, the forge and any other resources they need during setup.
+                format: uint64
+                type: integer
+                x-go-name: ProxyID
+            proxy_name:
+                type: string
+                x-go-name: ProxyName
             repo_id:
                 type: string
                 x-go-name: RepoID
@@ -1609,6 +1856,54 @@ definitions:
         items:
             $ref: '#/definitions/Provider'
         type: array
+        x-go-package: github.com/cloudbase/garm/params
+    Proxies:
+        description: used by swagger client generated code
+        items:
+            $ref: '#/definitions/Proxy'
+        type: array
+        x-go-package: github.com/cloudbase/garm/params
+    Proxy:
+        properties:
+            created_at:
+                format: date-time
+                type: string
+                x-go-name: CreatedAt
+            description:
+                type: string
+                x-go-name: Description
+            http_proxy:
+                description: HTTPProxy is the proxy URL used for plain HTTP requests.
+                type: string
+                x-go-name: HTTPProxy
+            https_proxy:
+                description: HTTPSProxy is the proxy URL used for HTTPS requests.
+                type: string
+                x-go-name: HTTPSProxy
+            id:
+                format: uint64
+                type: integer
+                x-go-name: ID
+            name:
+                type: string
+                x-go-name: Name
+            no_proxy:
+                description: |-
+                    NoProxy is a comma separated list of hosts, domains or CIDRs for
+                    which the proxy should be bypassed.
+                type: string
+                x-go-name: NoProxy
+            updated_at:
+                format: date-time
+                type: string
+                x-go-name: UpdatedAt
+            username:
+                description: |-
+                    Username is the username used to authenticate to the proxy. If set,
+                    it will be composed into the final proxy URLs handed to runners.
+                type: string
+                x-go-name: Username
+        type: object
         x-go-package: github.com/cloudbase/garm/params
     Repositories:
         description: used by swagger client generated code
@@ -1815,6 +2110,17 @@ definitions:
             provider_name:
                 type: string
                 x-go-name: ProviderName
+            proxy_id:
+                description: |-
+                    ProxyID is the ID of the proxy definition that will be used by runners
+                    spawned in this scale set. Runners will use the proxy settings to reach
+                    back to GARM, the forge and any other resources they need during setup.
+                format: uint64
+                type: integer
+                x-go-name: ProxyID
+            proxy_name:
+                type: string
+                x-go-name: ProxyName
             repo_id:
                 type: string
                 x-go-name: RepoID
@@ -1898,10 +2204,8 @@ definitions:
                 type: string
                 x-go-name: CreatedAt
             data:
-                items:
-                    format: uint8
-                    type: integer
-                type: array
+                format: byte
+                type: string
                 x-go-name: Data
             description:
                 type: string
@@ -1937,11 +2241,16 @@ definitions:
             agent_url:
                 type: string
                 x-go-name: AgentURL
+            allow_insecure_garm_agent:
+                description: |-
+                    AllowInsecureGARMAgent configures deployed garm-agents to connect to
+                    GARM over plain http/ws (the agent's force_insecure setting). Meant
+                    for local development and testing only.
+                type: boolean
+                x-go-name: AllowInsecureGARMAgent
             ca_cert_bundle:
-                items:
-                    format: uint8
-                    type: integer
-                type: array
+                format: byte
+                type: string
                 x-go-name: CACertBundle
             callback_url:
                 type: string
@@ -1955,6 +2264,13 @@ definitions:
             garm_agent_releases_url:
                 type: string
                 x-go-name: GARMAgentReleasesURL
+            garm_agent_version:
+                description: |-
+                    GARMAgentVersion pins the garm-agent version the controller uses. An
+                    empty string or "latest" tracks the newest release at
+                    GARMAgentReleasesURL; any other value must be a valid semver version.
+                type: string
+                x-go-name: GARMAgentVersion
             metadata_url:
                 type: string
                 x-go-name: MetadataURL
@@ -2018,10 +2334,8 @@ definitions:
                 type: string
                 x-go-name: BaseURL
             ca_cert_bundle:
-                items:
-                    format: uint8
-                    type: integer
-                type: array
+                format: byte
+                type: string
                 x-go-name: CACertBundle
             description:
                 type: string
@@ -2046,6 +2360,22 @@ definitions:
                 x-go-name: Name
             pat:
                 $ref: '#/definitions/GithubPAT'
+            reserve_usage_enabled:
+                description: |-
+                    ReserveUsageEnabled toggles whether or not to allocate a certain
+                    percentage of the available rate limit to critical operations such
+                    as delete operations for runners that have finished their jobs.
+                type: boolean
+                x-go-name: ReserveUsageEnabled
+            reserve_usage_percentage:
+                description: |-
+                    ReserveUsagePercentage is the percentage of available rate limit reserved
+                    for critical operations. Setting this value too high will negatively impact
+                    normal operations, so it is capped at 50%. A value between 5% and 20%
+                    should be safe on most setups. Adjust this based on your usage patterns.
+                format: int64
+                type: integer
+                x-go-name: ReserveUsagePercentage
         type: object
         x-go-package: github.com/cloudbase/garm/params
     UpdateGithubEndpointParams:
@@ -2057,10 +2387,8 @@ definitions:
                 type: string
                 x-go-name: BaseURL
             ca_cert_bundle:
-                items:
-                    format: uint8
-                    type: integer
-                type: array
+                format: byte
+                type: string
                 x-go-name: CACertBundle
             description:
                 type: string
@@ -2110,6 +2438,13 @@ definitions:
                 format: uint64
                 type: integer
                 x-go-name: Priority
+            proxy_id:
+                description: |-
+                    ProxyID is the ID of the proxy definition runners in this pool will
+                    use. Setting it to 0 removes the proxy from the pool.
+                format: uint64
+                type: integer
+                x-go-name: ProxyID
             runner_bootstrap_timeout:
                 format: uint64
                 type: integer
@@ -2128,8 +2463,48 @@ definitions:
                 x-go-name: TemplateID
         type: object
         x-go-package: github.com/cloudbase/garm/params
+    UpdateProxyParams:
+        properties:
+            description:
+                type: string
+                x-go-name: Description
+            http_proxy:
+                description: HTTPProxy is the proxy URL used for plain HTTP requests.
+                type: string
+                x-go-name: HTTPProxy
+            https_proxy:
+                description: HTTPSProxy is the proxy URL used for HTTPS requests.
+                type: string
+                x-go-name: HTTPSProxy
+            name:
+                type: string
+                x-go-name: Name
+            no_proxy:
+                description: |-
+                    NoProxy is a comma separated list of hosts, domains or CIDRs for
+                    which the proxy should be bypassed. Setting it to an empty string
+                    clears the value.
+                type: string
+                x-go-name: NoProxy
+            password:
+                description: |-
+                    Password is the password used to authenticate to the proxy. Setting
+                    it to an empty string clears the password.
+                type: string
+                x-go-name: Password
+            username:
+                description: |-
+                    Username is the username used to authenticate to the proxy. Setting
+                    it to an empty string clears the proxy credentials.
+                type: string
+                x-go-name: Username
+        type: object
+        x-go-package: github.com/cloudbase/garm/params
     UpdateScaleSetParams:
         properties:
+            disable_update:
+                type: boolean
+                x-go-name: DisableUpdate
             enable_shell:
                 type: boolean
                 x-go-name: EnableShell
@@ -2163,6 +2538,13 @@ definitions:
                 $ref: '#/definitions/OSArch'
             os_type:
                 $ref: '#/definitions/OSType'
+            proxy_id:
+                description: |-
+                    ProxyID is the ID of the proxy definition runners in this scale set
+                    will use. Setting it to 0 removes the proxy from the scale set.
+                format: uint64
+                type: integer
+                x-go-name: ProxyID
             runner_bootstrap_timeout:
                 format: uint64
                 type: integer
@@ -2188,10 +2570,8 @@ definitions:
     UpdateTemplateParams:
         properties:
             data:
-                items:
-                    format: uint8
-                    type: integer
-                type: array
+                format: byte
+                type: string
                 x-go-name: Data
             description:
                 type: string
@@ -2675,6 +3055,343 @@ paths:
             summary: Initialize the first run of the controller.
             tags:
                 - first-run
+    /forge-instances:
+        get:
+            operationId: ListForgeInstances
+            parameters:
+                - description: Exact endpoint name to filter by
+                  in: query
+                  name: endpoint
+                  type: string
+            responses:
+                "200":
+                    description: ForgeInstances
+                    schema:
+                        $ref: '#/definitions/ForgeInstances'
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: List all forge instances.
+            tags:
+                - forge-instances
+        post:
+            operationId: CreateForgeInstance
+            parameters:
+                - description: Parameters used to create the forge instance.
+                  in: body
+                  name: Body
+                  required: true
+                  schema:
+                    $ref: '#/definitions/CreateForgeInstanceParams'
+                    description: Parameters used to create the forge instance.
+                    type: object
+            responses:
+                "200":
+                    description: ForgeInstance
+                    schema:
+                        $ref: '#/definitions/ForgeInstance'
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: Create forge instance with the given parameters.
+            tags:
+                - forge-instances
+    /forge-instances/{forgeInstanceID}:
+        delete:
+            operationId: DeleteForgeInstance
+            parameters:
+                - description: ID of the forge instance to delete.
+                  in: path
+                  name: forgeInstanceID
+                  required: true
+                  type: string
+                - description: If true and a webhook is installed for this forge instance, it will not be removed.
+                  in: query
+                  name: keepWebhook
+                  type: boolean
+            responses:
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: Delete forge instance by ID.
+            tags:
+                - forge-instances
+        get:
+            operationId: GetForgeInstance
+            parameters:
+                - description: The ID of the forge instance to fetch.
+                  in: path
+                  name: forgeInstanceID
+                  required: true
+                  type: string
+            responses:
+                "200":
+                    description: ForgeInstance
+                    schema:
+                        $ref: '#/definitions/ForgeInstance'
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: Get forge instance by ID.
+            tags:
+                - forge-instances
+        put:
+            operationId: UpdateForgeInstance
+            parameters:
+                - description: The ID of the forge instance to update.
+                  in: path
+                  name: forgeInstanceID
+                  required: true
+                  type: string
+                - description: Parameters used when updating the forge instance.
+                  in: body
+                  name: Body
+                  required: true
+                  schema:
+                    $ref: '#/definitions/UpdateEntityParams'
+                    description: Parameters used when updating the forge instance.
+                    type: object
+            responses:
+                "200":
+                    description: ForgeInstance
+                    schema:
+                        $ref: '#/definitions/ForgeInstance'
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: Update forge instance with the given parameters.
+            tags:
+                - forge-instances
+    /forge-instances/{forgeInstanceID}/instances:
+        get:
+            operationId: ListForgeInstanceInstances
+            parameters:
+                - description: Forge instance ID.
+                  in: path
+                  name: forgeInstanceID
+                  required: true
+                  type: string
+            responses:
+                "200":
+                    description: Instances
+                    schema:
+                        $ref: '#/definitions/Instances'
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: List forge instance runner instances.
+            tags:
+                - forge-instances
+    /forge-instances/{forgeInstanceID}/pools:
+        get:
+            operationId: ListForgeInstancePools
+            parameters:
+                - description: Forge instance ID.
+                  in: path
+                  name: forgeInstanceID
+                  required: true
+                  type: string
+            responses:
+                "200":
+                    description: Pools
+                    schema:
+                        $ref: '#/definitions/Pools'
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: List forge instance pools.
+            tags:
+                - forge-instances
+                - pools
+        post:
+            operationId: CreateForgeInstancePool
+            parameters:
+                - description: Forge instance ID.
+                  in: path
+                  name: forgeInstanceID
+                  required: true
+                  type: string
+                - description: Parameters used when creating the forge instance pool.
+                  in: body
+                  name: Body
+                  required: true
+                  schema:
+                    $ref: '#/definitions/CreatePoolParams'
+                    description: Parameters used when creating the forge instance pool.
+                    type: object
+            responses:
+                "200":
+                    description: Pool
+                    schema:
+                        $ref: '#/definitions/Pool'
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: Create forge instance pool with the parameters given.
+            tags:
+                - forge-instances
+                - pools
+    /forge-instances/{forgeInstanceID}/pools/{poolID}:
+        delete:
+            operationId: DeleteForgeInstancePool
+            parameters:
+                - description: Forge instance ID.
+                  in: path
+                  name: forgeInstanceID
+                  required: true
+                  type: string
+                - description: ID of the forge instance pool to delete.
+                  in: path
+                  name: poolID
+                  required: true
+                  type: string
+            responses:
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: Delete forge instance pool by ID.
+            tags:
+                - forge-instances
+                - pools
+        get:
+            operationId: GetForgeInstancePool
+            parameters:
+                - description: Forge instance ID.
+                  in: path
+                  name: forgeInstanceID
+                  required: true
+                  type: string
+                - description: Pool ID.
+                  in: path
+                  name: poolID
+                  required: true
+                  type: string
+            responses:
+                "200":
+                    description: Pool
+                    schema:
+                        $ref: '#/definitions/Pool'
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: Get forge instance pool by ID.
+            tags:
+                - forge-instances
+                - pools
+        put:
+            operationId: UpdateForgeInstancePool
+            parameters:
+                - description: Forge instance ID.
+                  in: path
+                  name: forgeInstanceID
+                  required: true
+                  type: string
+                - description: ID of the forge instance pool to update.
+                  in: path
+                  name: poolID
+                  required: true
+                  type: string
+                - description: Parameters used when updating the forge instance pool.
+                  in: body
+                  name: Body
+                  required: true
+                  schema:
+                    $ref: '#/definitions/UpdatePoolParams'
+                    description: Parameters used when updating the forge instance pool.
+                    type: object
+            responses:
+                "200":
+                    description: Pool
+                    schema:
+                        $ref: '#/definitions/Pool'
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: Update forge instance pool with the parameters given.
+            tags:
+                - forge-instances
+                - pools
+    /forge-instances/{forgeInstanceID}/webhook:
+        delete:
+            operationId: UninstallForgeInstanceWebhook
+            parameters:
+                - description: Forge instance ID.
+                  in: path
+                  name: forgeInstanceID
+                  required: true
+                  type: string
+            responses:
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: Uninstall forge instance webhook.
+            tags:
+                - forge-instances
+                - hooks
+        get:
+            operationId: GetForgeInstanceWebhookInfo
+            parameters:
+                - description: Forge instance ID.
+                  in: path
+                  name: forgeInstanceID
+                  required: true
+                  type: string
+            responses:
+                "200":
+                    description: HookInfo
+                    schema:
+                        $ref: '#/definitions/HookInfo'
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: Get information about the GARM installed webhook on a forge instance.
+            tags:
+                - forge-instances
+                - hooks
+        post:
+            description: |-
+                Install the GARM webhook for a forge instance. The secret configured on the forge instance will
+                be used to validate the requests.
+            operationId: InstallForgeInstanceWebhook
+            parameters:
+                - description: Forge instance ID.
+                  in: path
+                  name: forgeInstanceID
+                  required: true
+                  type: string
+                - description: Parameters used when creating the forge instance webhook.
+                  in: body
+                  name: Body
+                  required: true
+                  schema:
+                    $ref: '#/definitions/InstallWebhookParams'
+                    description: Parameters used when creating the forge instance webhook.
+                    type: object
+            responses:
+                "200":
+                    description: HookInfo
+                    schema:
+                        $ref: '#/definitions/HookInfo'
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            tags:
+                - forge-instances
+                - hooks
     /gitea/credentials:
         get:
             operationId: ListGiteaCredentials
@@ -3783,6 +4500,109 @@ paths:
             summary: List all providers.
             tags:
                 - providers
+    /proxies:
+        get:
+            operationId: ListProxies
+            responses:
+                "200":
+                    description: Proxies
+                    schema:
+                        $ref: '#/definitions/Proxies'
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: List proxies.
+            tags:
+                - proxies
+        post:
+            operationId: CreateProxy
+            parameters:
+                - description: Parameters used when creating the proxy.
+                  in: body
+                  name: Body
+                  required: true
+                  schema:
+                    $ref: '#/definitions/CreateProxyParams'
+                    description: Parameters used when creating the proxy.
+                    type: object
+            responses:
+                "200":
+                    description: Proxy
+                    schema:
+                        $ref: '#/definitions/Proxy'
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: Create proxy with the parameters given.
+            tags:
+                - proxies
+    /proxies/{proxyID}:
+        delete:
+            operationId: DeleteProxy
+            parameters:
+                - description: ID of the proxy to delete.
+                  in: path
+                  name: proxyID
+                  required: true
+                  type: number
+            responses:
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: Delete proxy by ID.
+            tags:
+                - proxies
+        get:
+            operationId: GetProxy
+            parameters:
+                - description: ID of the proxy to fetch.
+                  in: path
+                  name: proxyID
+                  required: true
+                  type: number
+            responses:
+                "200":
+                    description: Proxy
+                    schema:
+                        $ref: '#/definitions/Proxy'
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: Get proxy by ID.
+            tags:
+                - proxies
+        put:
+            operationId: UpdateProxy
+            parameters:
+                - description: ID of the proxy to update.
+                  in: path
+                  name: proxyID
+                  required: true
+                  type: number
+                - description: Parameters used when updating the proxy.
+                  in: body
+                  name: Body
+                  required: true
+                  schema:
+                    $ref: '#/definitions/UpdateProxyParams'
+                    description: Parameters used when updating the proxy.
+                    type: object
+            responses:
+                "200":
+                    description: Proxy
+                    schema:
+                        $ref: '#/definitions/Proxy'
+                default:
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: Update proxy with the parameters given.
+            tags:
+                - proxies
     /repositories:
         get:
             operationId: ListRepos
@@ -4480,6 +5300,24 @@ paths:
                     schema:
                         $ref: '#/definitions/APIErrorResponse'
             summary: Upload a GARM agent tool binary.
+            tags:
+                - tools
+    /tools/garm-agent/releases:
+        get:
+            description: |-
+                as recorded in the cached release index. The release the controller is
+                pinned to and the release "latest" resolves to are marked.
+            operationId: ListGARMAgentReleases
+            responses:
+                "200":
+                    description: GARMAgentReleases
+                    schema:
+                        $ref: '#/definitions/GARMAgentReleases'
+                "400":
+                    description: APIErrorResponse
+                    schema:
+                        $ref: '#/definitions/APIErrorResponse'
+            summary: List the garm-agent releases available at the controller's releases URL,
             tags:
                 - tools
 produces:

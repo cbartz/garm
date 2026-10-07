@@ -294,6 +294,76 @@ func (s *sqlDatabase) sqlToCommonEnterprise(enterprise Enterprise, detailed bool
 	return ret, nil
 }
 
+func (s *sqlDatabase) sqlToCommonForgeInstance(fi ForgeInstance, detailed bool) (params.ForgeInstance, error) {
+	if len(fi.WebhookSecret) == 0 {
+		return params.ForgeInstance{}, errors.New("missing secret")
+	}
+	secret, err := util.Unseal(fi.WebhookSecret, []byte(s.cfg.Passphrase))
+	if err != nil {
+		return params.ForgeInstance{}, fmt.Errorf("error decrypting secret: %w", err)
+	}
+
+	endpoint, err := s.sqlToCommonGithubEndpoint(fi.Endpoint)
+	if err != nil {
+		return params.ForgeInstance{}, fmt.Errorf("error converting endpoint: %w", err)
+	}
+
+	ret := params.ForgeInstance{
+		ID:               fi.ID.String(),
+		CredentialsName:  fi.GiteaCredentials.Name,
+		Pools:            make([]params.Pool, len(fi.Pools)),
+		WebhookSecret:    string(secret),
+		PoolBalancerType: fi.PoolBalancerType,
+		CreatedAt:        fi.CreatedAt,
+		UpdatedAt:        fi.UpdatedAt,
+		Endpoint:         endpoint,
+		AgentMode:        fi.AgentMode,
+		PoolManagerStatus: params.PoolManagerStatus{
+			IsRunning:     fi.PoolManagerRunning,
+			FailureReason: fi.PoolManagerFailureReason,
+		},
+	}
+
+	if fi.GiteaCredentialsID != nil {
+		ret.CredentialsID = *fi.GiteaCredentialsID
+	}
+
+	if len(fi.Events) > 0 {
+		ret.Events = make([]params.EntityEvent, len(fi.Events))
+		for idx, event := range fi.Events {
+			ret.Events[idx] = params.EntityEvent{
+				ID:         event.ID,
+				Message:    event.Message,
+				EventType:  event.EventType,
+				EventLevel: event.EventLevel,
+				CreatedAt:  event.CreatedAt,
+			}
+		}
+	}
+
+	if detailed {
+		creds, err := s.sqlGiteaToCommonForgeCredentials(fi.GiteaCredentials)
+		if err != nil {
+			return params.ForgeInstance{}, fmt.Errorf("error converting credentials: %w", err)
+		}
+		ret.Credentials = creds
+		ret.CredentialsName = creds.Name
+	}
+
+	if ret.PoolBalancerType == "" {
+		ret.PoolBalancerType = params.PoolBalancerTypeRoundRobin
+	}
+
+	for idx, pool := range fi.Pools {
+		ret.Pools[idx], err = s.sqlToCommonPool(pool)
+		if err != nil {
+			return params.ForgeInstance{}, fmt.Errorf("error converting pool: %w", err)
+		}
+	}
+
+	return ret, nil
+}
+
 func (s *sqlDatabase) sqlToCommonPool(pool Pool) (params.Pool, error) {
 	ret := params.Pool{
 		ID:             pool.ID.String(),
@@ -325,6 +395,11 @@ func (s *sqlDatabase) sqlToCommonPool(pool Pool) (params.Pool, error) {
 		ret.TemplateName = pool.Template.Name
 	}
 
+	if pool.ProxyID != nil && *pool.ProxyID != 0 {
+		ret.ProxyID = *pool.ProxyID
+		ret.ProxyName = pool.Proxy.Name
+	}
+
 	var ep GithubEndpoint
 	if pool.RepoID != nil {
 		ret.RepoID = pool.RepoID.String()
@@ -344,6 +419,11 @@ func (s *sqlDatabase) sqlToCommonPool(pool Pool) (params.Pool, error) {
 		ret.EnterpriseID = pool.EnterpriseID.String()
 		ret.EnterpriseName = pool.Enterprise.Name
 		ep = pool.Enterprise.Endpoint
+	}
+
+	if pool.ForgeInstanceID != nil && pool.ForgeInstance.EndpointName != nil {
+		ret.ForgeInstanceID = pool.ForgeInstanceID.String()
+		ep = pool.ForgeInstance.Endpoint
 	}
 
 	endpoint, err := s.sqlToCommonGithubEndpoint(ep)
@@ -402,6 +482,11 @@ func (s *sqlDatabase) sqlToCommonScaleSet(scaleSet ScaleSet) (params.ScaleSet, e
 	if scaleSet.TemplateID != nil && *scaleSet.TemplateID != 0 {
 		ret.TemplateID = *scaleSet.TemplateID
 		ret.TemplateName = scaleSet.Template.Name
+	}
+
+	if scaleSet.ProxyID != nil && *scaleSet.ProxyID != 0 {
+		ret.ProxyID = *scaleSet.ProxyID
+		ret.ProxyName = scaleSet.Proxy.Name
 	}
 
 	var ep GithubEndpoint
@@ -612,6 +697,21 @@ func (s *sqlDatabase) updatePool(tx *gorm.DB, pool Pool, param params.UpdatePool
 		updates["template_id"] = param.TemplateID
 	}
 
+	if param.ProxyID != nil && (pool.ProxyID == nil || *param.ProxyID != *pool.ProxyID) {
+		if *param.ProxyID == 0 {
+			if pool.ProxyID != nil {
+				updates["proxy_id"] = nil
+				incrementGeneration = true
+			}
+		} else {
+			if err := s.hasProxy(tx, *param.ProxyID); err != nil {
+				return params.Pool{}, 0, fmt.Errorf("error checking pool proxy: %w", err)
+			}
+			updates["proxy_id"] = *param.ProxyID
+			incrementGeneration = true
+		}
+	}
+
 	if param.MinIdleRunners != nil && *param.MinIdleRunners != pool.MinIdleRunners {
 		updates["min_idle_runners"] = *param.MinIdleRunners
 	}
@@ -745,6 +845,8 @@ func (s *sqlDatabase) hasGithubEntity(tx *gorm.DB, entityType params.ForgeEntity
 		q = tx.Model(&Organization{}).Where("id = ?", u)
 	case params.ForgeEntityTypeEnterprise:
 		q = tx.Model(&Enterprise{}).Where("id = ?", u)
+	case params.ForgeEntityTypeInstance:
+		q = tx.Model(&ForgeInstance{}).Where("id = ?", u)
 	default:
 		return fmt.Errorf("error invalid entity type: %w", runnerErrors.ErrBadRequest)
 	}
@@ -804,6 +906,8 @@ func (s *sqlDatabase) GetForgeEntity(_ context.Context, entityType params.ForgeE
 		ghEntity, err = s.GetOrganizationByID(s.ctx, entityID)
 	case params.ForgeEntityTypeRepository:
 		ghEntity, err = s.GetRepositoryByID(s.ctx, entityID)
+	case params.ForgeEntityTypeInstance:
+		ghEntity, err = s.GetForgeInstanceByID(s.ctx, entityID)
 	default:
 		return params.ForgeEntity{}, fmt.Errorf("error invalid entity type: %w", runnerErrors.ErrBadRequest)
 	}
@@ -957,6 +1061,50 @@ func (s *sqlDatabase) addEnterpriseEvent(ctx context.Context, entID string, even
 	return nil
 }
 
+func (s *sqlDatabase) addForgeInstanceEvent(ctx context.Context, fiID string, event params.EventType, eventLevel params.EventLevel, statusMessage string, maxEvents int) error {
+	fi, err := s.getForgeInstanceByID(ctx, s.conn, fiID)
+	if err != nil {
+		return fmt.Errorf("error fetching forge instance: %w", err)
+	}
+
+	msg := ForgeInstanceEvent{
+		Message:         statusMessage,
+		EventType:       event,
+		EventLevel:      eventLevel,
+		ForgeInstanceID: fi.ID,
+	}
+
+	if err := s.conn.Create(&msg).Error; err != nil {
+		return fmt.Errorf("error adding status message: %w", err)
+	}
+
+	if maxEvents > 0 {
+		var count int64
+		if err := s.conn.Model(&ForgeInstanceEvent{}).Where("forge_instance_id = ?", fi.ID).Count(&count).Error; err != nil {
+			return fmt.Errorf("error counting events: %w", err)
+		}
+
+		if count > int64(maxEvents) {
+			var cutoffEvent ForgeInstanceEvent
+			if err := s.conn.Model(&ForgeInstanceEvent{}).
+				Select("id").
+				Where("forge_instance_id = ?", fi.ID).
+				Order("id desc").
+				Offset(maxEvents - 1).
+				Limit(1).
+				First(&cutoffEvent).Error; err != nil {
+				return fmt.Errorf("error finding cutoff event: %w", err)
+			}
+
+			if err := s.conn.Where("forge_instance_id = ? and id < ?", fi.ID, cutoffEvent.ID).Unscoped().Delete(&ForgeInstanceEvent{}).Error; err != nil {
+				return fmt.Errorf("error deleting old events: %w", err)
+			}
+		}
+	}
+
+	return nil
+}
+
 func (s *sqlDatabase) AddEntityEvent(ctx context.Context, entity params.ForgeEntity, event params.EventType, eventLevel params.EventLevel, statusMessage string, maxEvents int) error {
 	if maxEvents == 0 {
 		return fmt.Errorf("max events cannot be 0: %w", runnerErrors.ErrBadRequest)
@@ -969,6 +1117,8 @@ func (s *sqlDatabase) AddEntityEvent(ctx context.Context, entity params.ForgeEnt
 		return s.addOrgEvent(ctx, entity.ID, event, eventLevel, statusMessage, maxEvents)
 	case params.ForgeEntityTypeEnterprise:
 		return s.addEnterpriseEvent(ctx, entity.ID, event, eventLevel, statusMessage, maxEvents)
+	case params.ForgeEntityTypeInstance:
+		return s.addForgeInstanceEvent(ctx, entity.ID, event, eventLevel, statusMessage, maxEvents)
 	default:
 		return fmt.Errorf("invalid entity type: %w", runnerErrors.ErrBadRequest)
 	}
@@ -989,19 +1139,21 @@ func (s *sqlDatabase) sqlToCommonForgeCredentials(creds GithubCredentials) (para
 	}
 
 	commonCreds := params.ForgeCredentials{
-		ID:                 creds.ID,
-		Name:               creds.Name,
-		Description:        creds.Description,
-		APIBaseURL:         creds.Endpoint.APIBaseURL,
-		BaseURL:            creds.Endpoint.BaseURL,
-		UploadBaseURL:      creds.Endpoint.UploadBaseURL,
-		CABundle:           creds.Endpoint.CACertBundle,
-		AuthType:           creds.AuthType,
-		CreatedAt:          creds.CreatedAt,
-		UpdatedAt:          creds.UpdatedAt,
-		ForgeType:          creds.Endpoint.EndpointType,
-		Endpoint:           ep,
-		CredentialsPayload: data,
+		ID:                     creds.ID,
+		Name:                   creds.Name,
+		Description:            creds.Description,
+		APIBaseURL:             creds.Endpoint.APIBaseURL,
+		BaseURL:                creds.Endpoint.BaseURL,
+		UploadBaseURL:          creds.Endpoint.UploadBaseURL,
+		CABundle:               creds.Endpoint.CACertBundle,
+		AuthType:               creds.AuthType,
+		CreatedAt:              creds.CreatedAt,
+		UpdatedAt:              creds.UpdatedAt,
+		ForgeType:              creds.Endpoint.EndpointType,
+		Endpoint:               ep,
+		CredentialsPayload:     data,
+		ReserveUsageEnabled:    creds.ReserveUsageEnabled,
+		ReserveUsagePercentage: creds.ReserveUsagePercentage,
 	}
 
 	for _, repo := range creds.Repositories {
@@ -1215,6 +1367,10 @@ func (s *sqlDatabase) updateEntityCredentials(ctx context.Context, tx *gorm.DB, 
 			if e.GiteaCredentialsID == nil || *e.GiteaCredentialsID != credID {
 				updates["gitea_credentials_id"] = credID
 			}
+		case *ForgeInstance:
+			if e.GiteaCredentialsID == nil || *e.GiteaCredentialsID != credID {
+				updates["gitea_credentials_id"] = credID
+			}
 		}
 	default:
 		return runnerErrors.NewBadRequestError("unsupported endpoint type: %s", forgeType)
@@ -1234,6 +1390,8 @@ func (s *sqlDatabase) SetEntityPoolManagerStatus(ctx context.Context, entity par
 		_, err = s.UpdateOrganization(ctx, entity.ID, updateEntityParams)
 	case params.ForgeEntityTypeRepository:
 		_, err = s.UpdateRepository(ctx, entity.ID, updateEntityParams)
+	case params.ForgeEntityTypeInstance:
+		_, err = s.UpdateForgeInstance(ctx, entity.ID, updateEntityParams)
 	}
 	return err
 }
