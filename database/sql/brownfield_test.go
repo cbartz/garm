@@ -166,6 +166,9 @@ func migrationIDs(t *testing.T, conn *gorm.DB, table string) []string {
 
 func hasColumn(t *testing.T, conn *gorm.DB, table, column string) bool {
 	t.Helper()
+	if conn.Name() != "sqlite" {
+		return conn.Migrator().HasColumn(table, column)
+	}
 	var count int64
 	require.NoError(t, conn.Raw("SELECT count(*) FROM pragma_table_info(?) WHERE name = ?", table, column).Scan(&count).Error)
 	return count == 1
@@ -190,8 +193,16 @@ var (
 	fixtureConstraintRe = regexp.MustCompile("CONSTRAINT `(fk_[a-z0-9_]+)`")
 )
 
+// removedByMigrations lists schema items from the v0.2.1 fixture that a
+// later migration removes on purpose. 0010 moved scale set jobs to their
+// own table and dropped the old column and its index.
+var removedByMigrations = map[string]bool{
+	"scaleset_job_id_idx": true,
+}
+
 // requireFixtureSchemaPreserved asserts that every index and foreign key
-// constraint present in the v0.2.1 fixture still exists after the upgrade.
+// constraint present in the v0.2.1 fixture still exists after the upgrade,
+// unless a migration removed it on purpose.
 func requireFixtureSchemaPreserved(t *testing.T, conn *gorm.DB, fixturePath string) {
 	t.Helper()
 	contents, err := os.ReadFile(fixturePath)
@@ -202,6 +213,9 @@ func requireFixtureSchemaPreserved(t *testing.T, conn *gorm.DB, fixturePath stri
 	joined := strings.Join(allDDL, "\n")
 
 	for _, m := range fixtureIndexRe.FindAllStringSubmatch(string(contents), -1) {
+		if removedByMigrations[m[1]] {
+			continue
+		}
 		var count int64
 		require.NoError(t, conn.Raw("SELECT count(*) FROM sqlite_master WHERE type='index' AND name = ?", m[1]).Scan(&count).Error)
 		require.EqualValues(t, 1, count, "index %s from the v0.2.1 schema is gone after upgrade", m[1])
@@ -241,6 +255,8 @@ func TestBrownfieldMigration(t *testing.T) {
 	require.Contains(t, ids, "0001_baseline")
 	require.Contains(t, ids, "0006_proxies")
 	require.Contains(t, ids, "0008_constraint_parity")
+	require.Contains(t, ids, "0010_scaleset_jobs")
+	require.Contains(t, ids, "0011_job_pool_attribution")
 	require.NotContains(t, ids, "SCHEMA_INIT")
 
 	objectIDs := migrationIDs(t, db.objectsConn, "file_object_migrations")
@@ -257,6 +273,9 @@ func TestBrownfieldMigration(t *testing.T) {
 	require.True(t, db.conn.Migrator().HasTable("forge_instances"))
 	require.True(t, hasColumn(t, db.conn, "scale_sets", "proxy_id"))
 	require.True(t, hasColumn(t, db.conn, "github_credentials", "reserve_usage_enabled"))
+	require.True(t, db.conn.Migrator().HasTable("scale_set_jobs"))
+	require.False(t, hasColumn(t, db.conn, "workflow_jobs", "scale_set_job_id"))
+	require.True(t, hasColumn(t, db.conn, "workflow_jobs", "pool_id"))
 	require.True(t, hasColumn(t, db.objectsConn, "file_blobs", "lo_oid"))
 
 	// Seeded rows survived.
@@ -276,7 +295,8 @@ func TestBrownfieldMigration(t *testing.T) {
 		"instances":               4,
 		"addresses":               1,
 		"instance_status_updates": 1,
-		"workflow_jobs":           2,
+		"workflow_jobs":           1,
+		"scale_set_jobs":          1,
 		"controller_infos":        1,
 	} {
 		require.EqualValues(t, expected, countRows(t, db.conn, table), "row count mismatch in %s", table)
@@ -328,9 +348,22 @@ func TestBrownfieldMigration(t *testing.T) {
 
 	jobs, err := store.ListAllJobs(adminCtx)
 	require.NoError(t, err)
-	require.Len(t, jobs, 2)
+	require.Len(t, jobs, 1)
+	require.EqualValues(t, 201, jobs[0].WorkflowJobID)
 
-	controllerInfo, err := store.ControllerInfo()
+	// The scale set job moved to its own table with the runner name
+	// resolved from the instance it referenced.
+	scaleSetJobs, err := store.ListAllScaleSetJobs(adminCtx)
+	require.NoError(t, err)
+	require.Len(t, scaleSetJobs, 1)
+	require.Equal(t, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", scaleSetJobs[0].ScaleSetJobID)
+	require.Equal(t, "scaleset job", scaleSetJobs[0].Name)
+	require.Equal(t, string(params.JobStatusInProgress), scaleSetJobs[0].Status)
+	require.EqualValues(t, 100, scaleSetJobs[0].WorkflowRunID)
+	require.Equal(t, "garm-scaleset-runner", scaleSetJobs[0].RunnerName)
+	require.Zero(t, scaleSetJobs[0].ScaleSetID, "moved records have no owner attribution")
+
+	controllerInfo, err := store.ControllerInfo(adminCtx)
 	require.NoError(t, err)
 	require.Equal(t, seedControllerID, controllerInfo.ControllerID.String())
 
@@ -399,7 +432,7 @@ func TestConstraintParityOnPostgres(t *testing.T) {
 		"INSERT INTO pools (id, created_at, updated_at, provider_name, runner_prefix, max_runners, min_idle_runners, runner_bootstrap_timeout, image, flavor, os_type, os_arch, enabled, generation, priority, proxy_id) VALUES ('99999999-9999-9999-9999-999999999999', now(), now(), 'test-provider', 'garm', 4, 0, 20, 'ubuntu:24.04', 'default', 'linux', 'amd64', true, 1, 0, 12345)").Error)
 	require.NoError(t, db.conn.Exec("DELETE FROM migrations WHERE id = '0008_constraint_parity'").Error)
 
-	require.NoError(t, db.migrateDB(), "0008 failed on a PostgreSQL database missing the constraints")
+	require.NoError(t, migrateSchema(context.Background(), db.conn, db.objectsConn), "0008 failed on a PostgreSQL database missing the constraints")
 
 	require.Contains(t, migrationIDs(t, db.conn, "migrations"), "0008_constraint_parity")
 	for constraint := range parityConstraints {
@@ -411,10 +444,84 @@ func TestConstraintParityOnPostgres(t *testing.T) {
 
 	// Phase 2: a database that already has everything; 0008 must no-op.
 	require.NoError(t, db.conn.Exec("DELETE FROM migrations WHERE id = '0008_constraint_parity'").Error)
-	require.NoError(t, db.migrateDB(), "0008 must be a no-op on a constrained PostgreSQL database")
+	require.NoError(t, migrateSchema(context.Background(), db.conn, db.objectsConn), "0008 must be a no-op on a constrained PostgreSQL database")
 	for constraint := range parityConstraints {
 		requireConstraintCountPG(t, db.conn, constraint, 1)
 	}
+}
+
+// TestTagNameLengthOnPostgres exercises 0009 on a PostgreSQL database whose
+// tags.name column still has the original varchar(64) type.
+func TestTagNameLengthOnPostgres(t *testing.T) {
+	if os.Getenv("GARM_TEST_POSTGRES_DSN") == "" {
+		t.Skip("GARM_TEST_POSTGRES_DSN not set")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watcher.InitWatcher(ctx)
+	defer watcher.CloseWatcher()
+
+	sqlDB, cfg := garmTesting.OpenTestPostgresDB(t)
+	store, err := newSQLStoreFromSQLDB(ctx, sqlDB, cfg)
+	require.NoError(t, err)
+	db := store.(*sqlDatabase)
+	t.Cleanup(func() { db.sqlDB.Close() })
+
+	require.NoError(t, db.conn.Exec("ALTER TABLE tags ALTER COLUMN name TYPE varchar(64)").Error)
+	require.NoError(t, db.conn.Exec("INSERT INTO tags (id, created_at, updated_at, name) VALUES (gen_random_uuid(), now(), now(), 'existing-tag')").Error)
+	require.NoError(t, db.conn.Exec("DELETE FROM migrations WHERE id = '0009_tag_name_length'").Error)
+
+	require.NoError(t, migrateSchema(context.Background(), db.conn, db.objectsConn))
+
+	require.Contains(t, migrationIDs(t, db.conn, "migrations"), "0009_tag_name_length")
+	var maxLength int64
+	require.NoError(t, db.conn.Raw(
+		"SELECT character_maximum_length FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'tags' AND column_name = 'name'").Scan(&maxLength).Error)
+	require.EqualValues(t, 255, maxLength)
+	require.EqualValues(t, 1, countRows(t, db.conn, "tags"))
+}
+
+// TestScaleSetJobsMoveOnPostgres exercises 0010 on a PostgreSQL database
+// that still records scale set jobs in workflow_jobs.
+func TestScaleSetJobsMoveOnPostgres(t *testing.T) {
+	if os.Getenv("GARM_TEST_POSTGRES_DSN") == "" {
+		t.Skip("GARM_TEST_POSTGRES_DSN not set")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watcher.InitWatcher(ctx)
+	defer watcher.CloseWatcher()
+
+	sqlDB, cfg := garmTesting.OpenTestPostgresDB(t)
+	store, err := newSQLStoreFromSQLDB(ctx, sqlDB, cfg)
+	require.NoError(t, err)
+	db := store.(*sqlDatabase)
+	t.Cleanup(func() { db.sqlDB.Close() })
+
+	// Reconstruct a database from before the split.
+	require.NoError(t, db.conn.Exec("DROP TABLE scale_set_jobs").Error)
+	require.NoError(t, db.conn.Exec("ALTER TABLE workflow_jobs ADD COLUMN scale_set_job_id text").Error)
+	require.NoError(t, db.conn.Exec(
+		"INSERT INTO workflow_jobs (id, workflow_job_id, scale_set_job_id, run_id, action, conclusion, status, name, repository_name, repository_owner, created_at, updated_at) VALUES (1, 0, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 100, 'push', '', 'in_progress', 'scaleset job', 'garm-testing', 'gsamfira', now(), now())").Error)
+	require.NoError(t, db.conn.Exec(
+		"INSERT INTO workflow_jobs (id, workflow_job_id, scale_set_job_id, run_id, action, conclusion, status, name, repository_name, repository_owner, created_at, updated_at) VALUES (2, 201, '', 101, 'queued', '', 'queued', 'pool job', 'garm-testing', 'gsamfira', now(), now())").Error)
+	require.NoError(t, db.conn.Exec("DELETE FROM migrations WHERE id = '0010_scaleset_jobs'").Error)
+
+	require.NoError(t, migrateSchema(context.Background(), db.conn, db.objectsConn))
+
+	require.Contains(t, migrationIDs(t, db.conn, "migrations"), "0010_scaleset_jobs")
+	require.True(t, db.conn.Migrator().HasTable("scale_set_jobs"))
+	require.False(t, hasColumn(t, db.conn, "workflow_jobs", "scale_set_job_id"))
+	require.EqualValues(t, 1, countRows(t, db.conn, "workflow_jobs"))
+	require.EqualValues(t, 1, countRows(t, db.conn, "scale_set_jobs"))
+
+	adminCtx := garmTesting.ImpersonateAdminContext(ctx, store, t)
+	moved, err := store.ListAllScaleSetJobs(adminCtx)
+	require.NoError(t, err)
+	require.Len(t, moved, 1)
+	require.Equal(t, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", moved[0].ScaleSetJobID)
+	require.Equal(t, string(params.JobStatusInProgress), moved[0].Status)
+	require.EqualValues(t, 100, moved[0].WorkflowRunID)
 }
 
 // TestFreshDatabaseUsesInitSchema ensures new installs keep taking the
@@ -468,9 +575,153 @@ INSERT INTO file_object_migrations (id) VALUES ('0001_baseline');
 	ids := migrationIDs(t, db.conn, "migrations")
 	require.Contains(t, ids, "0002_lower_indexes")
 	require.Contains(t, ids, "0008_constraint_parity")
+	require.Contains(t, ids, "0010_scaleset_jobs")
 	require.NotContains(t, ids, "SCHEMA_INIT")
 
 	require.True(t, db.conn.Migrator().HasTable("forge_instances"))
 	require.EqualValues(t, 4, countRows(t, db.conn, "instances"))
 	requireNoFKViolations(t, db.conn)
+}
+
+// TestScaleSetJobsMoveRerunIsSafe reconstructs the window where 0010 copied
+// the rows into scale_set_jobs but crashed before deleting them from
+// workflow_jobs. Migrations run without a transaction, so a rerun must skip
+// the rows it already copied instead of tripping over the unique scale set
+// job ID.
+func TestScaleSetJobsMoveRerunIsSafe(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watcher.InitWatcher(ctx)
+	defer watcher.CloseWatcher()
+
+	cfg := garmTesting.GetTestSqliteDBConfig(t)
+	store, err := NewSQLStore(ctx, cfg)
+	require.NoError(t, err)
+	db := store.(*sqlDatabase)
+
+	// In the crash window the old column still exists and the row sits in
+	// both tables. Quote the column name the way gorm does when it creates
+	// columns. The sqlite driver rebuilds tables by rewriting the stored
+	// DDL and only recognizes quoted column names when removing one.
+	require.NoError(t, db.conn.Exec("ALTER TABLE workflow_jobs ADD COLUMN `scale_set_job_id` text").Error)
+	require.NoError(t, db.conn.Exec(
+		"INSERT INTO workflow_jobs (workflow_job_id, scale_set_job_id, run_id, action, conclusion, status, name, repository_name, repository_owner, created_at, updated_at) VALUES (0, 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 100, 'push', '', 'in_progress', 'scaleset job', 'garm-testing', 'gsamfira', datetime('now'), datetime('now'))").Error)
+	require.NoError(t, db.conn.Exec(
+		"INSERT INTO scale_set_jobs (scale_set_job_id, workflow_run_id, name, status, created_at, updated_at) VALUES ('aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee', 100, 'scaleset job', 'in_progress', datetime('now'), datetime('now'))").Error)
+	require.NoError(t, db.conn.Exec("DELETE FROM migrations WHERE id = '0010_scaleset_jobs'").Error)
+
+	require.NoError(t, migrateSchema(context.Background(), db.conn, db.objectsConn), "0010 rerun must tolerate rows that were already copied")
+
+	require.False(t, hasColumn(t, db.conn, "workflow_jobs", "scale_set_job_id"))
+	require.EqualValues(t, 0, countRows(t, db.conn, "workflow_jobs"))
+	require.EqualValues(t, 1, countRows(t, db.conn, "scale_set_jobs"))
+}
+
+func columnTypePG(t *testing.T, conn *gorm.DB, table, column string) string {
+	t.Helper()
+	var dataType string
+	require.NoError(t, conn.Raw(
+		"SELECT data_type FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?",
+		table, column).Scan(&dataType).Error)
+	return dataType
+}
+
+// TestForgeInstanceColumnTypesOnPostgres reconstructs the PostgreSQL
+// databases that ran 0003 as a real migration. The stub declared its columns
+// without a type, so they were created as text, and 0008 cannot compare a
+// text column to the uuid and varchar(64) keys it references.
+func TestForgeInstanceColumnTypesOnPostgres(t *testing.T) {
+	if os.Getenv("GARM_TEST_POSTGRES_DSN") == "" {
+		t.Skip("GARM_TEST_POSTGRES_DSN not set")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	watcher.InitWatcher(ctx)
+	defer watcher.CloseWatcher()
+
+	sqlDB, cfg := garmTesting.OpenTestPostgresDB(t)
+	store, err := newSQLStoreFromSQLDB(ctx, sqlDB, cfg)
+	require.NoError(t, err)
+	db := store.(*sqlDatabase)
+	t.Cleanup(func() { db.sqlDB.Close() })
+
+	// Turn the columns back into text. The constraints that reference them
+	// go first, they are what 0008 adds back.
+	forgeInstanceConstraints := map[string]string{
+		"fk_forge_instances_events":   "forge_instance_events",
+		"fk_forge_instances_pools":    "pools",
+		"fk_forge_instances_jobs":     "workflow_jobs",
+		"fk_forge_instances_endpoint": "forge_instances",
+	}
+	for constraint, table := range forgeInstanceConstraints {
+		require.NoError(t, db.conn.Exec("ALTER TABLE "+table+" DROP CONSTRAINT "+constraint).Error)
+	}
+	textColumns := map[string]string{
+		"forge_instance_events": "forge_instance_id",
+		"pools":                 "forge_instance_id",
+		"workflow_jobs":         "forge_instance_id",
+		"forge_instances":       "endpoint_name",
+	}
+	for table, column := range textColumns {
+		require.NoError(t, db.conn.Exec(
+			"ALTER TABLE "+table+" ALTER COLUMN "+column+" TYPE text USING "+column+"::text").Error)
+		require.Equal(t, "text", columnTypePG(t, db.conn, table, column))
+	}
+
+	// A live reference that must survive the conversion, plus an orphan in
+	// each table that 0008 resolves once the types line up.
+	forgeInstanceID := "11111111-1111-1111-1111-111111111111"
+	orphanID := "22222222-2222-2222-2222-222222222222"
+	require.NoError(t, db.conn.Exec(
+		"INSERT INTO forge_instances (id, created_at, updated_at, endpoint_name) VALUES (?, now(), now(), 'github.com')", forgeInstanceID).Error)
+	require.NoError(t, db.conn.Exec(
+		"INSERT INTO pools (id, created_at, updated_at, provider_name, runner_prefix, max_runners, min_idle_runners, runner_bootstrap_timeout, image, flavor, os_type, os_arch, enabled, generation, priority, forge_instance_id) VALUES (gen_random_uuid(), now(), now(), 'test-provider', 'garm', 4, 0, 20, 'ubuntu:24.04', 'default', 'linux', 'amd64', true, 1, 0, ?)",
+		forgeInstanceID).Error)
+	require.NoError(t, db.conn.Exec(
+		"INSERT INTO forge_instance_events (created_at, updated_at, event_type, event_level, message, forge_instance_id) VALUES (now(), now(), 'status', 'info', 'orphan', ?)", orphanID).Error)
+	require.NoError(t, db.conn.Exec(
+		"INSERT INTO workflow_jobs (workflow_job_id, run_id, action, conclusion, status, name, repository_name, repository_owner, created_at, updated_at, forge_instance_id) VALUES (1, 100, 'queued', '', 'queued', 'job', 'test-repo', 'test-org', now(), now(), ?)",
+		orphanID).Error)
+
+	// 0008 fails on its first statement, which is recorded nowhere, and
+	// gormigrate stops at the first error. An affected database therefore
+	// has nothing from 0008 onwards.
+	blocked := []string{
+		"0007a_forge_instance_column_types",
+		"0008_constraint_parity",
+		"0009_tag_name_length",
+		"0010_scaleset_jobs",
+		"0011_job_pool_attribution",
+	}
+	require.NoError(t, db.conn.Exec("DELETE FROM migrations WHERE id IN ?", blocked).Error)
+
+	require.NoError(t, migrateSchema(context.Background(), db.conn, db.objectsConn), "migrating a database with text forge instance columns failed")
+
+	ids := migrationIDs(t, db.conn, "migrations")
+	for _, id := range blocked {
+		require.Contains(t, ids, id, "%s did not run after the repair", id)
+	}
+
+	require.Equal(t, "character varying", columnTypePG(t, db.conn, "forge_instances", "endpoint_name"))
+	for table := range textColumns {
+		if table == "forge_instances" {
+			continue
+		}
+		require.Equal(t, "uuid", columnTypePG(t, db.conn, table, "forge_instance_id"), "%s was not converted", table)
+	}
+	for constraint := range forgeInstanceConstraints {
+		requireConstraintCountPG(t, db.conn, constraint, 1)
+	}
+
+	// The live references survived, both orphans were resolved.
+	var poolRefs int64
+	require.NoError(t, db.conn.Raw("SELECT count(*) FROM pools WHERE forge_instance_id = ?::uuid", forgeInstanceID).Scan(&poolRefs).Error)
+	require.EqualValues(t, 1, poolRefs, "the live forge instance reference was lost")
+	var endpointRefs int64
+	require.NoError(t, db.conn.Raw("SELECT count(*) FROM forge_instances WHERE endpoint_name = 'github.com'").Scan(&endpointRefs).Error)
+	require.EqualValues(t, 1, endpointRefs, "the live endpoint reference was lost")
+	require.EqualValues(t, 0, countRows(t, db.conn, "forge_instance_events"))
+	var jobRefs int64
+	require.NoError(t, db.conn.Raw("SELECT count(*) FROM workflow_jobs WHERE forge_instance_id IS NULL").Scan(&jobRefs).Error)
+	require.EqualValues(t, 1, jobRefs, "the orphaned job reference was not cleared")
 }

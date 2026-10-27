@@ -782,6 +782,26 @@ func (p ScaleSet) GitHubLabels() []Label {
 	return labels
 }
 
+// HasRequiredLabels returns true when every label in set is satisfied by
+// the labels the scale set registers with GitHub, the name plus tags. A
+// job requesting such a label set will be routed to the scale set.
+func (p ScaleSet) HasRequiredLabels(set []string) bool {
+	if len(set) == 0 {
+		return false
+	}
+	asMap := map[string]struct{}{strings.ToLower(p.Name): {}}
+	for _, t := range p.Tags {
+		asMap[strings.ToLower(t.Name)] = struct{}{}
+	}
+
+	for _, l := range set {
+		if _, ok := asMap[strings.ToLower(l)]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 func (p ScaleSet) BelongsTo(entity ForgeEntity) bool {
 	switch p.ScaleSetType() {
 	case ForgeEntityTypeRepository:
@@ -1186,7 +1206,8 @@ type ControllerInfo struct {
 	// GARM will ignore the job until the job's age is greater than this value. When using
 	// the min_idle_runners feature of a pool, this gives enough time for potential idle
 	// runners to pick up the job before GARM attempts to allocate a new runner, thus avoiding
-	// the need to potentially scale down runners later.
+	// the need to potentially scale down runners later. When set to 0, pool managers also
+	// react to queued webhooks immediately instead of on their next poll.
 	MinimumJobAgeBackoff uint `json:"minimum_job_age_backoff,omitempty"`
 	// Version is the version of the GARM controller.
 	Version string `json:"version,omitempty"`
@@ -1348,14 +1369,38 @@ func (g ForgeCredentials) CriticalRateLimitReached() (bool, time.Time) {
 	return g.rateLimitReached(0)
 }
 
-func (g ForgeCredentials) GetHTTPClient(ctx context.Context) (*http.Client, error) {
-	var roots *x509.CertPool
-	if g.CABundle != nil {
-		roots = x509.NewCertPool()
-		ok := roots.AppendCertsFromPEM(g.CABundle)
-		if !ok {
-			return nil, fmt.Errorf("failed to parse CA cert")
-		}
+// CACertPool returns the cert pool defined by the credentials CA bundle. A
+// nil pool means no bundle is set and the system trust store applies.
+func (g ForgeCredentials) CACertPool() (*x509.CertPool, error) {
+	if g.CABundle == nil {
+		return nil, nil
+	}
+	roots := x509.NewCertPool()
+	if ok := roots.AppendCertsFromPEM(g.CABundle); !ok {
+		return nil, fmt.Errorf("failed to parse CA cert")
+	}
+	return roots, nil
+}
+
+// GetBaseTransport returns the HTTP transport for talking to the forge
+// these credentials belong to. It trusts the credentials CA bundle and
+// runs HTTP/2 health checks. Requests multiplex over a small number of
+// HTTP/2 connections. When one dies silently (no FIN or RST reaches us),
+// requests on it hang until the kernel gives up retransmitting, which
+// takes around 15 minutes. The health checks send a PING frame on any
+// connection that received no frames for SendPingTimeout and close the
+// connection when the answer does not arrive within PingTimeout, failing
+// in-flight requests fast. A healthy peer answers PINGs even while it
+// holds a long poll open, so idle but live connections are unaffected.
+//
+// The transport carries no authentication. Callers that set their own
+// Authorization headers (like the scale set client) must use this and not
+// the client returned by GetHTTPClient, whose auth wrapper overwrites the
+// Authorization header on every request.
+func (g ForgeCredentials) GetBaseTransport() (*http.Transport, error) {
+	roots, err := g.CACertPool()
+	if err != nil {
+		return nil, fmt.Errorf("getting CA cert pool: %w", err)
 	}
 
 	dialer := &net.Dialer{
@@ -1363,17 +1408,28 @@ func (g ForgeCredentials) GetHTTPClient(ctx context.Context) (*http.Client, erro
 		KeepAlive: 30 * time.Second,
 	}
 
-	httpTransport := &http.Transport{
+	return &http.Transport{
 		Proxy:       http.ProxyFromEnvironment,
 		DialContext: dialer.DialContext,
 		TLSClientConfig: &tls.Config{
 			RootCAs:    roots,
 			MinVersion: tls.VersionTLS12,
 		},
-		ForceAttemptHTTP2:     true,
+		ForceAttemptHTTP2: true,
+		HTTP2: &http.HTTP2Config{
+			SendPingTimeout: 30 * time.Second,
+			PingTimeout:     15 * time.Second,
+		},
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   10 * time.Second,
 		ExpectContinueTimeout: 1 * time.Second,
+	}, nil
+}
+
+func (g ForgeCredentials) GetHTTPClient(ctx context.Context) (*http.Client, error) {
+	httpTransport, err := g.GetBaseTransport()
+	if err != nil {
+		return nil, fmt.Errorf("getting base transport: %w", err)
 	}
 
 	var tc *http.Client
@@ -1472,8 +1528,6 @@ type Job struct {
 	ID int64 `json:"id,omitempty"`
 
 	WorkflowJobID int64 `json:"workflow_job_id,omitempty"`
-	// ScaleSetJobID is the job ID when generated for a scale set.
-	ScaleSetJobID string `json:"scaleset_job_id,omitempty"`
 	// RunID is the ID of the workflow run. A run may have multiple jobs.
 	RunID int64 `json:"run_id,omitempty"`
 	// Action is the specific activity that triggered the event.
@@ -1517,7 +1571,50 @@ type Job struct {
 	EnterpriseID    *uuid.UUID `json:"enterprise_id,omitempty"`
 	ForgeInstanceID *uuid.UUID `json:"forge_instance_id,omitempty"`
 
+	// PoolID is set when one of the pool's runners picks up the job.
+	PoolID *uuid.UUID `json:"pool_id,omitempty"`
+
 	LockedBy uuid.UUID `json:"locked_by,omitempty"`
+
+	CreatedAt time.Time `json:"created_at,omitempty"`
+	UpdatedAt time.Time `json:"updated_at,omitempty"`
+}
+
+// ScaleSetJob is the informational record of a job GitHub routed to a
+// scale set. GitHub schedules these server side, so GARM never acts on
+// them. They exist so users can list the jobs a scale set handled and
+// see which runner serviced them.
+// swagger:model ScaleSetJob
+type ScaleSetJob struct {
+	ID uint `json:"id,omitempty"`
+
+	// ScaleSetJobID is the job ID assigned by the GitHub actions service.
+	ScaleSetJobID string `json:"scaleset_job_id,omitempty"`
+	// ScaleSetID is GARM's ID of the scale set that handled the job. It
+	// is zero for records migrated from older GARM versions, which never
+	// recorded the owning scale set.
+	ScaleSetID uint `json:"scaleset_id,omitempty"`
+
+	WorkflowRunID   int64    `json:"workflow_run_id,omitempty"`
+	RunnerRequestID int64    `json:"runner_request_id,omitempty"`
+	JobWorkflowRef  string   `json:"job_workflow_ref,omitempty"`
+	Name            string   `json:"name,omitempty"`
+	Status          string   `json:"status,omitempty"`
+	Result          string   `json:"result,omitempty"`
+	EventName       string   `json:"event_name,omitempty"`
+	RequestLabels   []string `json:"request_labels,omitempty"`
+	RepositoryName  string   `json:"repository_name,omitempty"`
+	RepositoryOwner string   `json:"repository_owner,omitempty"`
+	RunnerGroupName string   `json:"runner_group_name,omitempty"`
+	RunnerID        int64    `json:"runner_id,omitempty"`
+	RunnerName      string   `json:"runner_name,omitempty"`
+	WorkflowRunURL  string   `json:"workflow_run_url,omitempty"`
+
+	// Timestamps reported by GitHub for the job's routing funnel.
+	QueueTime          time.Time `json:"queue_time,omitempty"`
+	ScaleSetAssignTime time.Time `json:"scaleset_assign_time,omitempty"`
+	RunnerAssignTime   time.Time `json:"runner_assign_time,omitempty"`
+	FinishTime         time.Time `json:"finish_time,omitempty"`
 
 	CreatedAt time.Time `json:"created_at,omitempty"`
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
@@ -1550,6 +1647,30 @@ func (j Job) BelongsTo(entity ForgeEntity) bool {
 // swagger:model Jobs
 // used by swagger client generated code
 type Jobs []Job
+
+// swagger:model ScaleSetJobs
+// used by swagger client generated code
+type ScaleSetJobs []ScaleSetJob
+
+// swagger:model JobsPaginatedResponse
+type JobsPaginatedResponse = PaginatedResponse[Job]
+
+// swagger:model ScaleSetJobsPaginatedResponse
+type ScaleSetJobsPaginatedResponse = PaginatedResponse[ScaleSetJob]
+
+// ListJobsFilter narrows down and paginates job listings. The zero value
+// lists the first page of jobs that are not yet completed.
+type ListJobsFilter struct {
+	Page     uint64
+	PageSize uint64
+	// IncludeCompleted also lists jobs that already finished. Without it
+	// only queued and in progress jobs are returned.
+	IncludeCompleted bool
+	// Since and Until bound the listing to jobs recorded inside the given
+	// window. A zero value leaves that end of the window open.
+	Since time.Time
+	Until time.Time
+}
 
 // swagger:model InstallWebhookParams
 type InstallWebhookParams struct {

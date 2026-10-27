@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 	"gorm.io/datatypes"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 
 	runnerErrors "github.com/cloudbase/garm-provider-common/errors"
 	commonParams "github.com/cloudbase/garm-provider-common/params"
@@ -750,7 +751,7 @@ func (s *sqlDatabase) updatePool(tx *gorm.DB, pool Pool, param params.UpdatePool
 
 	var rowsAffected int64
 	if len(updates) > 0 {
-		q := tx.Model(&pool).Omit("Repository", "Organization", "Enterprise", "Tags").Updates(updates)
+		q := tx.Model(&pool).Omit(clause.Associations).Updates(updates)
 		if q.Error != nil {
 			return params.Pool{}, 0, fmt.Errorf("error saving database entry: %w", q.Error)
 		}
@@ -896,18 +897,18 @@ func (s *sqlDatabase) sendNotify(entityType dbCommon.DatabaseEntityType, op dbCo
 	return s.producer.Notify(message)
 }
 
-func (s *sqlDatabase) GetForgeEntity(_ context.Context, entityType params.ForgeEntityType, entityID string) (params.ForgeEntity, error) {
+func (s *sqlDatabase) GetForgeEntity(ctx context.Context, entityType params.ForgeEntityType, entityID string) (params.ForgeEntity, error) {
 	var ghEntity params.EntityGetter
 	var err error
 	switch entityType {
 	case params.ForgeEntityTypeEnterprise:
-		ghEntity, err = s.GetEnterpriseByID(s.ctx, entityID)
+		ghEntity, err = s.GetEnterpriseByID(ctx, entityID)
 	case params.ForgeEntityTypeOrganization:
-		ghEntity, err = s.GetOrganizationByID(s.ctx, entityID)
+		ghEntity, err = s.GetOrganizationByID(ctx, entityID)
 	case params.ForgeEntityTypeRepository:
-		ghEntity, err = s.GetRepositoryByID(s.ctx, entityID)
+		ghEntity, err = s.GetRepositoryByID(ctx, entityID)
 	case params.ForgeEntityTypeInstance:
-		ghEntity, err = s.GetForgeInstanceByID(s.ctx, entityID)
+		ghEntity, err = s.GetForgeInstanceByID(ctx, entityID)
 	default:
 		return params.ForgeEntity{}, fmt.Errorf("error invalid entity type: %w", runnerErrors.ErrBadRequest)
 	}
@@ -936,20 +937,20 @@ func (s *sqlDatabase) addRepositoryEvent(ctx context.Context, repoID string, eve
 	}
 
 	// Use Create instead of Association.Append to avoid loading all existing events
-	if err := s.conn.Create(&msg).Error; err != nil {
+	if err := s.conn.WithContext(ctx).Create(&msg).Error; err != nil {
 		return fmt.Errorf("error adding status message: %w", err)
 	}
 
 	if maxEvents > 0 {
 		var count int64
-		if err := s.conn.Model(&RepositoryEvent{}).Where("repo_id = ?", repo.ID).Count(&count).Error; err != nil {
+		if err := s.conn.WithContext(ctx).Model(&RepositoryEvent{}).Where("repo_id = ?", repo.ID).Count(&count).Error; err != nil {
 			return fmt.Errorf("error counting events: %w", err)
 		}
 
 		if count > int64(maxEvents) {
 			// Get the ID of the Nth most recent event
 			var cutoffEvent RepositoryEvent
-			if err := s.conn.Model(&RepositoryEvent{}).
+			if err := s.conn.WithContext(ctx).Model(&RepositoryEvent{}).
 				Select("id").
 				Where("repo_id = ?", repo.ID).
 				Order("id desc").
@@ -960,7 +961,7 @@ func (s *sqlDatabase) addRepositoryEvent(ctx context.Context, repoID string, eve
 			}
 
 			// Delete all events older than the cutoff
-			if err := s.conn.Where("repo_id = ? and id < ?", repo.ID, cutoffEvent.ID).Unscoped().Delete(&RepositoryEvent{}).Error; err != nil {
+			if err := s.conn.WithContext(ctx).Where("repo_id = ? and id < ?", repo.ID, cutoffEvent.ID).Unscoped().Delete(&RepositoryEvent{}).Error; err != nil {
 				return fmt.Errorf("error deleting old events: %w", err)
 			}
 		}
@@ -982,20 +983,20 @@ func (s *sqlDatabase) addOrgEvent(ctx context.Context, orgID string, event param
 	}
 
 	// Use Create instead of Association.Append to avoid loading all existing events
-	if err := s.conn.Create(&msg).Error; err != nil {
+	if err := s.conn.WithContext(ctx).Create(&msg).Error; err != nil {
 		return fmt.Errorf("error adding status message: %w", err)
 	}
 
 	if maxEvents > 0 {
 		var count int64
-		if err := s.conn.Model(&OrganizationEvent{}).Where("org_id = ?", org.ID).Count(&count).Error; err != nil {
+		if err := s.conn.WithContext(ctx).Model(&OrganizationEvent{}).Where("org_id = ?", org.ID).Count(&count).Error; err != nil {
 			return fmt.Errorf("error counting events: %w", err)
 		}
 
 		if count > int64(maxEvents) {
 			// Get the ID of the Nth most recent event
 			var cutoffEvent OrganizationEvent
-			if err := s.conn.Model(&OrganizationEvent{}).
+			if err := s.conn.WithContext(ctx).Model(&OrganizationEvent{}).
 				Select("id").
 				Where("org_id = ?", org.ID).
 				Order("id desc").
@@ -1006,7 +1007,7 @@ func (s *sqlDatabase) addOrgEvent(ctx context.Context, orgID string, event param
 			}
 
 			// Delete all events older than the cutoff
-			if err := s.conn.Where("org_id = ? and id < ?", org.ID, cutoffEvent.ID).Unscoped().Delete(&OrganizationEvent{}).Error; err != nil {
+			if err := s.conn.WithContext(ctx).Where("org_id = ? and id < ?", org.ID, cutoffEvent.ID).Unscoped().Delete(&OrganizationEvent{}).Error; err != nil {
 				return fmt.Errorf("error deleting old events: %w", err)
 			}
 		}
@@ -1028,20 +1029,20 @@ func (s *sqlDatabase) addEnterpriseEvent(ctx context.Context, entID string, even
 	}
 
 	// Use Create instead of Association.Append to avoid loading all existing events
-	if err := s.conn.Create(&msg).Error; err != nil {
+	if err := s.conn.WithContext(ctx).Create(&msg).Error; err != nil {
 		return fmt.Errorf("error adding status message: %w", err)
 	}
 
 	if maxEvents > 0 {
 		var count int64
-		if err := s.conn.Model(&EnterpriseEvent{}).Where("enterprise_id = ?", ent.ID).Count(&count).Error; err != nil {
+		if err := s.conn.WithContext(ctx).Model(&EnterpriseEvent{}).Where("enterprise_id = ?", ent.ID).Count(&count).Error; err != nil {
 			return fmt.Errorf("error counting events: %w", err)
 		}
 
 		if count > int64(maxEvents) {
 			// Get the ID of the Nth most recent event
 			var cutoffEvent EnterpriseEvent
-			if err := s.conn.Model(&EnterpriseEvent{}).
+			if err := s.conn.WithContext(ctx).Model(&EnterpriseEvent{}).
 				Select("id").
 				Where("enterprise_id = ?", ent.ID).
 				Order("id desc").
@@ -1052,7 +1053,7 @@ func (s *sqlDatabase) addEnterpriseEvent(ctx context.Context, entID string, even
 			}
 
 			// Delete all events older than the cutoff
-			if err := s.conn.Where("enterprise_id = ? and id < ?", ent.ID, cutoffEvent.ID).Unscoped().Delete(&EnterpriseEvent{}).Error; err != nil {
+			if err := s.conn.WithContext(ctx).Where("enterprise_id = ? and id < ?", ent.ID, cutoffEvent.ID).Unscoped().Delete(&EnterpriseEvent{}).Error; err != nil {
 				return fmt.Errorf("error deleting old events: %w", err)
 			}
 		}
@@ -1074,19 +1075,19 @@ func (s *sqlDatabase) addForgeInstanceEvent(ctx context.Context, fiID string, ev
 		ForgeInstanceID: fi.ID,
 	}
 
-	if err := s.conn.Create(&msg).Error; err != nil {
+	if err := s.conn.WithContext(ctx).Create(&msg).Error; err != nil {
 		return fmt.Errorf("error adding status message: %w", err)
 	}
 
 	if maxEvents > 0 {
 		var count int64
-		if err := s.conn.Model(&ForgeInstanceEvent{}).Where("forge_instance_id = ?", fi.ID).Count(&count).Error; err != nil {
+		if err := s.conn.WithContext(ctx).Model(&ForgeInstanceEvent{}).Where("forge_instance_id = ?", fi.ID).Count(&count).Error; err != nil {
 			return fmt.Errorf("error counting events: %w", err)
 		}
 
 		if count > int64(maxEvents) {
 			var cutoffEvent ForgeInstanceEvent
-			if err := s.conn.Model(&ForgeInstanceEvent{}).
+			if err := s.conn.WithContext(ctx).Model(&ForgeInstanceEvent{}).
 				Select("id").
 				Where("forge_instance_id = ?", fi.ID).
 				Order("id desc").
@@ -1096,7 +1097,7 @@ func (s *sqlDatabase) addForgeInstanceEvent(ctx context.Context, fiID string, ev
 				return fmt.Errorf("error finding cutoff event: %w", err)
 			}
 
-			if err := s.conn.Where("forge_instance_id = ? and id < ?", fi.ID, cutoffEvent.ID).Unscoped().Delete(&ForgeInstanceEvent{}).Error; err != nil {
+			if err := s.conn.WithContext(ctx).Where("forge_instance_id = ? and id < ?", fi.ID, cutoffEvent.ID).Unscoped().Delete(&ForgeInstanceEvent{}).Error; err != nil {
 				return fmt.Errorf("error deleting old events: %w", err)
 			}
 		}
@@ -1299,6 +1300,7 @@ type CredentialsGetter interface {
 
 // fetchCredentialsByType fetches credentials by name for a given forge type
 func (s *sqlDatabase) fetchCredentialsByType(ctx context.Context, tx *gorm.DB, credentialsName string, forgeType params.EndpointType) (CredentialsGetter, error) {
+	tx = tx.WithContext(ctx)
 	switch forgeType {
 	case params.GithubEndpointType:
 		return s.getGithubCredentialsByName(ctx, tx, credentialsName, false)
@@ -1311,6 +1313,7 @@ func (s *sqlDatabase) fetchCredentialsByType(ctx context.Context, tx *gorm.DB, c
 
 // updateEntityCredentials fetches, validates, and assigns credentials to an entity
 func (s *sqlDatabase) updateEntityCredentials(ctx context.Context, tx *gorm.DB, entity ForgeEntity, credentialsName string, updates map[string]interface{}) error {
+	tx = tx.WithContext(ctx)
 	if credentialsName == "" {
 		return nil
 	}

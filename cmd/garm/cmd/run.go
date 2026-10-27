@@ -50,6 +50,7 @@ import (
 	"github.com/cloudbase/garm/websocket"
 	"github.com/cloudbase/garm/workers/cache"
 	"github.com/cloudbase/garm/workers/entity"
+	jobsWorker "github.com/cloudbase/garm/workers/jobs"
 	metricsWorker "github.com/cloudbase/garm/workers/metrics"
 	"github.com/cloudbase/garm/workers/provider"
 	"github.com/cloudbase/garm/workers/websocket/agent"
@@ -69,6 +70,7 @@ type serverComponents struct {
 	agentHub       *agent.Hub
 	metricsHub     *wsMetrics.MetricsHub
 	cacheWorker    *cache.Worker
+	jobRetention   *jobsWorker.Worker
 	metricsWorker  *metricsWorker.Worker
 	providerWorker *provider.Provider
 	entityCtrl     *entity.Controller
@@ -124,7 +126,7 @@ func initInfrastructure(ctx context.Context, cfg *config.Config, hub *websocket.
 		return nil, fmt.Errorf("creating database: %w", err)
 	}
 
-	controllerInfo, err := maybeInitController(db)
+	controllerInfo, err := maybeInitController(ctx, db)
 	if err != nil {
 		return nil, err
 	}
@@ -155,6 +157,11 @@ func initInfrastructure(ctx context.Context, cfg *config.Config, hub *websocket.
 	rnr, err := runner.NewRunner(ctx, *cfg, db, instanceTokenGetter)
 	if err != nil {
 		return nil, fmt.Errorf("creating runner: %w", err)
+	}
+
+	jobRetention := jobsWorker.NewWorker(ctx, db)
+	if err := jobRetention.Start(); err != nil {
+		return nil, fmt.Errorf("starting job retention worker: %w", err)
 	}
 
 	cacheWorker := cache.NewWorker(ctx, db, rnr)
@@ -212,6 +219,7 @@ func initInfrastructure(ctx context.Context, cfg *config.Config, hub *websocket.
 		agentHub:       agentHub,
 		metricsHub:     metricsHub,
 		cacheWorker:    cacheWorker,
+		jobRetention:   jobRetention,
 		metricsWorker:  mWorker,
 		providerWorker: providerWorker,
 		entityCtrl:     entityCtrl,
@@ -371,14 +379,18 @@ func shutdownComponents(comp *serverComponents) {
 	if err := comp.cacheWorker.Stop(); err != nil {
 		slog.With(slog.Any("error", err)).Error("failed to stop cache worker")
 	}
+
+	if err := comp.jobRetention.Stop(); err != nil {
+		slog.With(slog.Any("error", err)).Error("failed to stop job retention worker")
+	}
 }
 
-func maybeInitController(db dbCommon.Store) (params.ControllerInfo, error) {
-	if info, err := db.ControllerInfo(); err == nil {
+func maybeInitController(ctx context.Context, db dbCommon.Store) (params.ControllerInfo, error) {
+	if info, err := db.ControllerInfo(ctx); err == nil {
 		return info, nil
 	}
 
-	info, err := db.InitController()
+	info, err := db.InitController(ctx)
 	if err != nil {
 		return params.ControllerInfo{}, fmt.Errorf("initializing controller: %w", err)
 	}

@@ -43,17 +43,30 @@ const requestTimeout = 60 * time.Second
 const longPollRequestTimeout = 100 * time.Second
 
 func NewClient(cli common.GithubClient) (*ScaleSetClient, error) {
+	// The base transport trusts the credentials CA bundle and runs HTTP/2
+	// health checks but carries no authentication. Scale set requests set
+	// their own Authorization headers (registration token, actions admin
+	// JWT, message queue token), which the auth wrapped client from
+	// GetHTTPClient would overwrite.
+	transport, err := cli.GetEntity().Credentials.GetBaseTransport()
+	if err != nil {
+		return nil, fmt.Errorf("building transport: %w", err)
+	}
+
 	// Use separate clients for regular API calls against the scaleset API
 	// and the scaleset long poll message queue. The long poll is held open
 	// by the broker for up to ~50 seconds by design, so it cannot share the
-	// tighter timeout every other call gets.
+	// tighter timeout every other call gets. Both share one transport, and
+	// with it one connection pool.
 	return &ScaleSetClient{
 		ghCli: cli,
 		httpClient: &http.Client{
-			Timeout: requestTimeout,
+			Timeout:   requestTimeout,
+			Transport: transport,
 		},
 		longPollClient: &http.Client{
-			Timeout: longPollRequestTimeout,
+			Timeout:   longPollRequestTimeout,
+			Transport: transport,
 		},
 	}, nil
 }
@@ -99,12 +112,6 @@ func (s *ScaleSetClient) recordFailedOperation(operation string) {
 		s.ghCli.GetEntity().LabelScope(),
 		s.endpointLabel(),
 	).Inc()
-}
-
-func (s *ScaleSetClient) SetGithubClient(cli common.GithubClient) {
-	s.mux.Lock()
-	defer s.mux.Unlock()
-	s.ghCli = cli
 }
 
 func (s *ScaleSetClient) GetGithubClient() (common.GithubClient, error) {
@@ -158,8 +165,12 @@ func (s *ScaleSetClient) doWithClient(client *http.Client, req *http.Request) (*
 		return nil, runnerErrors.NewBadRequestError("bad request while calling %s: %q", req.URL.String(), string(body))
 	case 409:
 		return nil, runnerErrors.NewConflictError("conflict while calling %s: %q", req.URL.String(), string(body))
-	case 401, 403:
-		return nil, runnerErrors.ErrUnauthorized
+	case 401:
+		return nil, runnerErrors.NewUnauthorizedError("unauthorized while calling %s: %q", req.URL.String(), string(body))
+	case 403:
+		// Also sent for secondary rate limits and SSO enforcement, so not
+		// the same as a 401. Callers must not treat this as dead credentials.
+		return nil, runnerErrors.NewForbiddenError("forbidden while calling %s: %q", req.URL.String(), string(body))
 	default:
 		return nil, fmt.Errorf("request to %s failed with status code %d: %q", req.URL.String(), resp.StatusCode, string(body))
 	}
